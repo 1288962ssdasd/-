@@ -2846,12 +2846,17 @@ if (typeof window.FriendsCircle === 'undefined') {
           // 构建普通回复格式
           const replyFormat = `[朋友圈回复|{{user}}|483920|${circleId}|${content}]`;
 
-          // 发送给AI
-          await this.sendToAI(
+          // 使用手机内部独立AI生成回复
+          const aiResult = await this.generateViaPhoneAI(
             `用户正在回复朋友圈。请为用户的回复生成1-3个他人的响应回复，只生成回复，不要重新生成整个帖子，也不要重新生成用户的回复，用户回复已完成。\n${replyFormat}`,
           );
 
-          this.showToast('回复已发送', 'success');
+          if (aiResult) {
+            this.showToast('回复已发送', 'success');
+            this._notifySTFriendsCircleActivity('reply', '{{user}}', content);
+          } else {
+            this.showToast('AI生成回复失败，请稍后重试', 'warning');
+          }
         }
 
         // 清空输入框并隐藏
@@ -2906,12 +2911,17 @@ if (typeof window.FriendsCircle === 'undefined') {
         // 构建回复评论格式
         const replyFormat = `[朋友圈回复|{{user}}|483920|${circleId}|回复${replyToAuthor}：${content}]`;
 
-        // 发送给AI
-        await this.sendToAI(
+        // 使用手机内部独立AI生成回复
+        const aiResult = await this.generateViaPhoneAI(
           `用户正在回复朋友圈的评论。请为用户的回复生成1-3个他人的响应回复，只生成回复，不要重新生成整个帖子，也不要重新生成用户的回复，用户回复已完成。\n${replyFormat}`,
         );
 
-        this.showToast('回复已发送', 'success');
+        if (aiResult) {
+          this.showToast('回复已发送', 'success');
+          this._notifySTFriendsCircleActivity('reply', '{{user}}', content);
+        } else {
+          this.showToast('AI生成回复失败，请稍后重试', 'warning');
+        }
       } catch (error) {
         console.error('[Friends Circle] 发送回复评论失败:', error);
         this.showToast('发送失败，请重试', 'error');
@@ -2919,11 +2929,78 @@ if (typeof window.FriendsCircle === 'undefined') {
     }
 
     /**
-     * 发送消息给AI
+     * 通过手机内部独立AI生成回复（不污染ST聊天上下文）
      * @param {string} message - 消息内容
+     * @returns {Promise<string|null>} AI生成的回复文本，失败时返回null
      */
-    async sendToAI(message) {
+    async generateViaPhoneAI(message) {
+      // 方法1：使用自定义API配置
+      if (window.mobileCustomAPIConfig && window.mobileCustomAPIConfig.isAPIAvailable && window.mobileCustomAPIConfig.isAPIAvailable()) {
+        try {
+          const messages = [{ role: 'user', content: message }];
+          const result = await window.mobileCustomAPIConfig.callAPI(messages, { temperature: 0.9, maxTokens: 300 });
+          if (typeof result === 'string') return result;
+          if (result && result.choices && result.choices[0]) return result.choices[0].message.content;
+        } catch (e) {
+          console.warn('[FriendsCircle] customAPI failed:', e);
+        }
+      }
+      // 方法2：使用RoleAPI
+      if (window.RoleAPI && window.RoleAPI.isEnabled && window.RoleAPI.isEnabled()) {
+        try {
+          const result = await window.RoleAPI.sendMessage('system', 'system', message, { skipHistory: true });
+          if (result) return result;
+        } catch (e) {
+          console.warn('[FriendsCircle] RoleAPI failed:', e);
+        }
+      }
+      // 方法3：使用XBBridge
+      if (window.XBBridge && window.XBBridge.isAvailable && window.XBBridge.isAvailable()) {
+        try {
+          const result = await new Promise((resolve, reject) => {
+            window.XBBridge.generate.generate({ prompt: message }, (response) => {
+              resolve(response);
+            }, (error) => {
+              reject(error);
+            });
+          });
+          if (result) return result;
+        } catch (e) {
+          console.warn('[FriendsCircle] XBBridge failed:', e);
+        }
+      }
+      console.warn('[FriendsCircle] 所有AI后端不可用');
+      return null;
+    }
+
+    /**
+     * 通过小白X变量通知ST朋友圈动态（可选）
+     * @param {string} type - 动态类型：'publish' 或 'reply'
+     * @param {string} author - 作者名
+     * @param {string} content - 简要内容
+     */
+    _notifySTFriendsCircleActivity(type, author, content) {
       try {
+        if (window.BridgeAPI && window.BridgeAPI.configManager) {
+          window.BridgeAPI.configManager.setVar('xb.phone.friendsCircle.lastActivity', JSON.stringify({
+            type: type,
+            author: author,
+            content: content,
+            timestamp: Date.now()
+          }));
+        }
+      } catch (e) {
+        console.warn('[FriendsCircle] 通知ST朋友圈动态失败:', e);
+      }
+    }
+
+    /**
+     * @deprecated 已废弃 - 直接操作ST上下文，会污染聊天记录
+     * 请使用 generateViaPhoneAI 代替
+     */
+    async _sendToSillyTavernDeprecated(message) {
+      try {
+        console.warn('[Friends Circle] _sendToSillyTavernDeprecated 已废弃，建议使用 generateViaPhoneAI');
         console.log('[Friends Circle] 发送消息给AI:', message);
 
         const chatMessage = {
@@ -3053,10 +3130,16 @@ if (typeof window.FriendsCircle === 'undefined') {
         // 构建朋友圈格式
         const circleFormat = `[朋友圈|{{user}}|483920|${floorId}|${content}]`;
 
-        // 发送给AI
-        await this.sendToAI(
+        // 使用手机内部独立AI生成好友回复
+        const aiResult = await this.generateViaPhoneAI(
           `用户发送朋友圈，请使用规定的朋友圈回复格式生成3-5条可能的好友回复，仅限有好友id的好友参与朋友圈回复。请注意，你是在为现有的用户朋友圈生成回复，只生成回复，禁止重复生成用户的朋友圈格式。\n${circleFormat}`,
         );
+
+        if (aiResult) {
+          this._notifySTFriendsCircleActivity('publish', '{{user}}', content);
+        } else {
+          this.showToast('AI生成好友回复失败，朋友圈已保存', 'warning');
+        }
 
         // 🌟 手动触发一次朋友圈解析，确保用户发送的朋友圈被正确解析
         setTimeout(async () => {
@@ -3112,12 +3195,17 @@ if (typeof window.FriendsCircle === 'undefined') {
           circleFormat = `[朋友圈|{{user}}|483920|${floorId}|${finalImageDesc}]`;
         }
 
-        // 发送给AI
-        await this.sendToAI(
+        // 使用手机内部独立AI生成好友回复
+        const aiResult = await this.generateViaPhoneAI(
           `用户发送朋友圈，请使用规定的朋友圈回复格式生成3-5条可能的好友回复，仅限有好友id的好友参与朋友圈回复。请注意，你是在为现有的用户朋友圈生成回复，只生成回复，禁止重复生成用户的朋友圈格式。\n${circleFormat}`,
         );
 
-        this.showToast('朋友圈已发送', 'success');
+        if (aiResult) {
+          this.showToast('朋友圈已发送', 'success');
+          this._notifySTFriendsCircleActivity('publish', '{{user}}', textContent || finalImageDesc);
+        } else {
+          this.showToast('AI生成好友回复失败，朋友圈已保存', 'warning');
+        }
         this.hidePublishModal();
       } catch (error) {
         console.error('[Friends Circle] 发送图片朋友圈失败:', error);
@@ -3375,8 +3463,14 @@ if (typeof window.FriendsCircle === 'undefined') {
         // 构建完整的消息，包含指导文本
         const fullMessage = `用户发送朋友圈，请使用规定的朋友圈回复格式生成3-5条可能的好友回复，仅限有好友id的好友参与朋友圈回复。请注意，你是在为现有的用户朋友圈生成回复，只生成回复，禁止重复生成用户的朋友圈格式。\n${circleFormat}`;
 
-        // 发送朋友圈格式消息，SillyTavern会自动附加图片
-        await this.sendToAI(fullMessage);
+        // 使用手机内部独立AI生成好友回复
+        const aiResult = await this.generateViaPhoneAI(fullMessage);
+
+        if (aiResult) {
+          this._notifySTFriendsCircleActivity('publish', '{{user}}', textContent || finalImageDesc);
+        } else {
+          this.showToast('AI生成好友回复失败，朋友圈已保存', 'warning');
+        }
 
         // 🌟 手动触发一次朋友圈解析，确保用户发送的朋友圈被正确解析
         setTimeout(async () => {

@@ -29,7 +29,7 @@
   border: none;
   padding: 8px 16px;
   border-radius: 20px;
-  color: white;
+  color: #4a3f3a;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -217,7 +217,7 @@
 
 /* 白色文字主题 */
 .text-color-white {
-  --message-text-color: #fff;
+  --message-text-color: #333;
 }
 
 /* 黑色文字主题 */
@@ -312,7 +312,7 @@
   border: none;
   padding: 8px 12px;
   border-radius: 15px;
-  color: white;
+  color: #4a3f3a;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -567,7 +567,7 @@
 }
 
 .tab-btn.active {
-  background: linear-gradient(135deg, #9291a3 0%, #cebaab 100%) !important;
+  background: linear-gradient(135deg, #7a7990 0%, #cebaab 100%) !important;
   color: white !important;
   box-shadow: 0 4px 12px rgba(146, 145, 163, 0.3);
   border-bottom: none !important;
@@ -630,7 +630,7 @@
 
 .refresh-friend-list {
   padding: 8px 12px;
-  background: linear-gradient(135deg, #cebaab 0%, #9291a3 100%);
+  background: linear-gradient(135deg, #a89e95 0%, #9291a3 100%);
   color: white;
   border: none;
   border-radius: 8px;
@@ -683,6 +683,10 @@
 .friend-avatar {
   width: 50px;
   height: 50px;
+  min-width: 50px;
+  min-height: 50px;
+  max-width: 50px;
+  max-height: 50px;
   border-radius: 50%;
   background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%);
   display: flex;
@@ -691,6 +695,18 @@
   font-size: 24px;
   color: white;
   text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+}
+
+.friend-avatar img {
+  width: 50px;
+  height: 50px;
+  min-width: 50px;
+  min-height: 50px;
+  max-width: 50px;
+  max-height: 50px;
+  object-fit: cover;
+  display: block;
 }
 
 .friend-details {
@@ -937,7 +953,7 @@
 }
 
 .message-item.selected .friend-name {
-  color: #9291a3;
+  color: #5a596e;
   font-weight: 600;
 }
 
@@ -1006,7 +1022,7 @@
 }
 
 .message-list-footer .send-message-btn {
-  background: linear-gradient(135deg, #9291a3 0%, #cebaab 100%);
+  background: linear-gradient(135deg, #7a7990 0%, #cebaab 100%);
   color: white;
   border: none;
   border-radius: 18px;
@@ -1329,7 +1345,7 @@
 
 .refresh-group-list {
   padding: 8px 12px;
-  background: linear-gradient(135deg, #cec5c0 0%, #9291a3 100%);
+  background: linear-gradient(135deg, #a89e95 0%, #9291a3 100%);
   color: white;
   border: none;
   border-radius: 8px;

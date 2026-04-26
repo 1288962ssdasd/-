@@ -1221,22 +1221,104 @@ ${itemsList}
       return '未知时间';
     }
 
-    // 发送查看商品消息
-    sendViewProductsMessage() {
+    // 通过手机内部独立AI生成内容（不操作ST的DOM）
+    async generateViaPhoneAI(message) {
+        // 方法1：使用自定义API配置
+        if (window.mobileCustomAPIConfig && window.mobileCustomAPIConfig.isAPIAvailable && window.mobileCustomAPIConfig.isAPIAvailable()) {
+            try {
+                const messages = [{ role: 'user', content: message }];
+                const result = await window.mobileCustomAPIConfig.callAPI(messages, { temperature: 0.8, maxTokens: 500 });
+                if (typeof result === 'string') return result;
+                if (result && result.choices && result.choices[0]) return result.choices[0].message.content;
+            } catch (e) {
+                console.warn('[ShopApp] customAPI failed:', e);
+            }
+        }
+        // 方法2：使用RoleAPI
+        if (window.RoleAPI && window.RoleAPI.isEnabled && window.RoleAPI.isEnabled()) {
+            try {
+                const result = await window.RoleAPI.sendMessage('system', 'system', message, { skipHistory: true });
+                if (result) return result;
+            } catch (e) {
+                console.warn('[ShopApp] RoleAPI failed:', e);
+            }
+        }
+        // 方法3：使用XBBridge（非流式）
+        if (window.XBBridge && window.XBBridge.isAvailable && window.XBBridge.isAvailable()) {
+            try {
+                const result = await new Promise((resolve, reject) => {
+                    window.XBBridge.generate.generate({ prompt: message }, (response) => {
+                        resolve(response);
+                    }, (error) => {
+                        reject(error);
+                    });
+                });
+                if (result) return result;
+            } catch (e) {
+                console.warn('[ShopApp] XBBridge failed:', e);
+            }
+        }
+        console.warn('[ShopApp] 所有AI后端不可用');
+        return null;
+    }
+
+    // 发送查看商品消息（通过手机内部AI生成，不发送到ST）
+    async sendViewProductsMessage() {
       try {
-        console.log('[Shop App] 发送查看商品消息');
+        console.log('[ShopApp] 通过手机内部AI生成商品列表...');
 
-        const message = '<Request:Meta-instructions：接下来你要，按照当前剧情，输出至少10件商品,注意更新对应变量,不要输出重复的商品>查看商品';
+        const message = '请按照当前剧情，生成至少10件商品的数据。请以JSON格式返回，格式为：[{"name":"商品名称","price":100,"stock":5,"category":"分类","description":"描述","quality":"品质"}]。只返回JSON，不要其他内容。';
 
-        // 使用与消息app相同的发送方式
-        this.sendToSillyTavern(message);
+        const result = await this.generateViaPhoneAI(message);
+        if (!result) {
+          this.showToast('AI不可用，无法生成商品列表', 'warning');
+          return;
+        }
+
+        // 尝试解析AI返回的商品数据
+        try {
+          // 提取JSON部分（AI可能在JSON前后加了其他文字）
+          const jsonMatch = result.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            const productsData = JSON.parse(jsonMatch[0]);
+            if (Array.isArray(productsData) && productsData.length > 0) {
+              console.log('[ShopApp] AI生成了', productsData.length, '件商品');
+              // 将AI生成的商品数据转换为内部格式并更新UI
+              const newProducts = productsData.map((p, index) => ({
+                id: `ai_${Date.now()}_${index}`,
+                name: p.name || `商品${index + 1}`,
+                type: p.category || '其他',
+                description: p.description || '暂无描述',
+                price: parseFloat(p.price) || 0,
+                image: this.getProductImage(p.category || '其他'),
+                stock: parseInt(p.stock) || 1,
+                quality: p.quality || '普通',
+                category: p.category || '其他',
+                timestamp: new Date().toLocaleString(),
+              }));
+
+              // 更新商品列表并刷新UI
+              this.products = newProducts;
+              this.updateAppContent();
+              this.showToast(`已生成 ${newProducts.length} 件商品`, 'success');
+            } else {
+              this.showToast('AI返回的商品数据格式不正确', 'warning');
+            }
+          } else {
+            this.showToast('AI返回的数据无法解析', 'warning');
+          }
+        } catch (parseError) {
+          console.error('[ShopApp] 解析AI返回的商品数据失败:', parseError);
+          this.showToast('解析商品数据失败', 'error');
+        }
       } catch (error) {
-        console.error('[Shop App] 发送查看商品消息失败:', error);
+        console.error('[ShopApp] 生成商品列表失败:', error);
+        this.showToast('生成商品列表失败: ' + error.message, 'error');
       }
     }
 
-    // 统一的发送消息方法（参考消息app的sendToChat方法）
-    async sendToSillyTavern(message) {
+    // [已废弃] 统一的发送消息方法 - 不再主动调用，保留仅供兼容
+    async _sendToSillyTavernDeprecated(message) {
       try {
         console.log('[Shop App] 🔄 使用新版发送方法 v2.0 - 发送消息到SillyTavern:', message);
 
@@ -1281,8 +1363,8 @@ ${itemsList}
       }
     }
 
-    // 备用发送方法
-    async sendToSillyTavernBackup(message) {
+    // [已废弃] 备用发送方法 - 不再主动调用，保留仅供兼容
+    async _sendToSillyTavernBackupDeprecated(message) {
       try {
         console.log('[Shop App] 尝试备用发送方法:', message);
 
@@ -1561,14 +1643,14 @@ window.shopAppForceReload = function () {
 // 检查发送方法版本
 window.shopAppCheckVersion = function () {
   console.log('[Shop App] 📋 版本检查:');
-  console.log('- sendToSillyTavern 方法:', typeof window.shopApp?.sendToSillyTavern);
-  console.log('- sendOrderToSillyTavern 方法:', typeof window.shopApp?.sendOrderToSillyTavern);
+  console.log('- generateViaPhoneAI 方法:', typeof window.shopApp?.generateViaPhoneAI);
+  console.log('- _sendToSillyTavernDeprecated 方法:', typeof window.shopApp?._sendToSillyTavernDeprecated);
   console.log('- sendViewProductsMessage 方法:', typeof window.shopApp?.sendViewProductsMessage);
 
-  if (window.shopApp?.sendToSillyTavern) {
-    console.log('✅ 新版发送方法已加载');
+  if (window.shopApp?.generateViaPhoneAI) {
+    console.log('✅ 新版generateViaPhoneAI方法已加载');
   } else {
-    console.log('❌ 新版发送方法未找到，请重新加载页面');
+    console.log('❌ 新版generateViaPhoneAI方法未找到，请重新加载页面');
   }
 };
 

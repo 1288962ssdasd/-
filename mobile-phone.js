@@ -368,7 +368,7 @@ class MobilePhone {
                                                         <span class="app-label">购物</span>
                                                     </div>
                                                     <div class="app-icon" data-app="task">
-                                                        <div class="app-icon-bg purple">📰</div>
+                                                        <div class="app-icon-bg purple">🎯</div>
                                                         <span class="app-label">任务</span>
                                                     </div>
                                                 </div>
@@ -1170,8 +1170,10 @@ class MobilePhone {
             viewBtn.innerHTML = '查看';
             viewBtn.title = '查看任务';
             viewBtn.addEventListener('click', () => {
-                if (window.taskAppSendViewMessage) {
-                    window.taskAppSendViewMessage();
+                if (window.QuestApp && typeof window.QuestApp.refresh === 'function') {
+                    window.QuestApp.refresh();
+                } else if (typeof window.questAppForceReload === 'function') {
+                    window.questAppForceReload();
                 }
             });
             headerRight.appendChild(viewBtn);
@@ -1380,12 +1382,19 @@ class MobilePhone {
             const message =
                 '用户正在查看朋友圈，请根据朋友圈规则系统，生成3-5个正确的朋友圈格式，根据角色间的关系为每条朋友圈生成0-5条回复。回复请使用与原楼层相同id。请使用正确的三位数楼层id,楼层id不能与历史楼层id重复。请正确使用前缀w。严禁代替用户回复。禁止发表情包或颜文字，可以使用emoji。';
 
-            // 发送消息给AI
-            if (window.friendsCircle && window.friendsCircle.sendToAI) {
-                await window.friendsCircle.sendToAI(message);
+            // 使用手机内部独立AI生成朋友圈内容
+            if (window.friendsCircle && window.friendsCircle.generateViaPhoneAI) {
+                const aiResult = await window.friendsCircle.generateViaPhoneAI(message);
 
-                if (window.showMobileToast) {
-                    window.showMobileToast('✅ 朋友圈内容生成完成', 'success');
+                if (aiResult) {
+                    if (window.showMobileToast) {
+                        window.showMobileToast('✅ 朋友圈内容生成完成', 'success');
+                    }
+                } else {
+                    console.warn('[Mobile Phone] AI生成朋友圈内容失败');
+                    if (window.showMobileToast) {
+                        window.showMobileToast('⚠️ AI生成失败，请稍后重试', 'warning');
+                    }
                 }
             } else {
                 console.error('[Mobile Phone] 朋友圈功能未就绪');
@@ -1528,7 +1537,7 @@ class MobilePhone {
                 name: '任务',
                 content: null, // 将由task-app动态生成
                 isCustomApp: true,
-                customHandler: this.handleTaskApp.bind(this),
+                customHandler: this.handleQuestApp.bind(this),
             },
             live: {
                 name: '直播',
@@ -1761,8 +1770,20 @@ class MobilePhone {
 
             // 处理自定义应用
             if (app.isCustomApp && app.customHandler) {
-                app.customHandler();
+                console.log('[Mobile Phone] 调用 customHandler:', appName);
+                try {
+                    var result = app.customHandler();
+                    // 如果返回Promise，捕获其错误
+                    if (result && typeof result.catch === 'function') {
+                        result.catch(function(err) {
+                            console.error('[Mobile Phone] customHandler Promise错误:', appName, err);
+                        });
+                    }
+                } catch (handlerErr) {
+                    console.error('[Mobile Phone] customHandler 同步错误:', appName, handlerErr);
+                }
             } else {
+                console.log('[Mobile Phone] 设置静态内容:', appName, 'content长度:', (app.content || '').length);
                 document.getElementById('app-content').innerHTML = app.content;
             }
 
@@ -2503,6 +2524,55 @@ class MobilePhone {
                     <button onclick="window.mobilePhone.handleBackpackApp()" class="retry-button">重试</button>
                 </div>
             `;
+        }
+    }
+
+    // 处理动态任务应用
+    async handleQuestApp() {
+        try {
+            console.log('[Mobile Phone] 开始处理动态任务应用...');
+
+            // 显示加载状态
+            var appContent = document.getElementById('app-content');
+            if (appContent) {
+                appContent.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#999;"><div style="font-size:32px;margin-bottom:10px;">⏳</div><div>正在加载任务系统...</div></div>';
+            }
+
+            // 等待模块就绪
+            if (window.Phone && !window.Phone.ready) {
+                await new Promise(function(resolve) {
+                    window.Phone.load(resolve);
+                });
+            }
+
+            // 检查 QuestApp 是否可用
+            if (!window.QuestApp) {
+                throw new Error('QuestApp 模块未加载');
+            }
+
+            // 使用 QuestApp 渲染
+            if (typeof window.getQuestAppContent === 'function') {
+                var content = window.getQuestAppContent();
+                if (appContent && content) {
+                    appContent.innerHTML = content;
+                }
+                if (typeof window.bindQuestAppEvents === 'function') {
+                    window.bindQuestAppEvents();
+                }
+            } else if (window.QuestApp && typeof window.QuestApp.init === 'function') {
+                window.QuestApp.init();
+                if (appContent) {
+                    appContent.innerHTML = window.QuestApp.getAppContent();
+                }
+            }
+
+            console.log('[Mobile Phone] 动态任务应用加载完成');
+        } catch (error) {
+            console.error('[Mobile Phone] 处理动态任务应用失败:', error);
+            var appContent = document.getElementById('app-content');
+            if (appContent) {
+                appContent.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#e74c3c;"><div style="font-size:32px;margin-bottom:10px;">❌</div><div>任务系统加载失败</div><div style="font-size:12px;color:#999;margin-top:5px;">' + (error.message || '未知错误') + '</div></div>';
+            }
         }
     }
 
@@ -5655,7 +5725,7 @@ class MobilePhone {
             // 加载CSS文件
             const cssLink = document.createElement('link');
             cssLink.rel = 'stylesheet';
-            cssLink.href = './scripts/extensions/third-party/mobile/app/forum-app/forum-ui.css';
+            cssLink.href = '/scripts/extensions/third-party/mobile/app/forum-app/forum-ui.css';
             cssLink.onload = () => {
                 console.log('[Mobile Phone] forum-ui.css 加载完成');
                 checkComplete();
@@ -5666,7 +5736,7 @@ class MobilePhone {
             // 加载控制应用CSS文件
             const controlCssLink = document.createElement('link');
             controlCssLink.rel = 'stylesheet';
-            controlCssLink.href = './scripts/extensions/third-party/mobile/app/forum-app/forum-control-app.css';
+            controlCssLink.href = '/scripts/extensions/third-party/mobile/app/forum-app/forum-control-app.css';
             controlCssLink.onload = () => {
                 console.log('[Mobile Phone] forum-control-app.css 加载完成');
                 checkComplete();
@@ -5676,7 +5746,7 @@ class MobilePhone {
 
             // 加载论坛管理器 JS文件
             const managerScript = document.createElement('script');
-            managerScript.src = './scripts/extensions/third-party/mobile/app/forum-app/forum-manager.js';
+            managerScript.src = '/scripts/extensions/third-party/mobile/app/forum-app/forum-manager.js';
             managerScript.onload = () => {
                 console.log('[Mobile Phone] forum-manager.js 加载完成');
                 checkComplete();
@@ -5686,7 +5756,7 @@ class MobilePhone {
 
             // 加载论坛样式管理器 JS文件
             const stylesScript = document.createElement('script');
-            stylesScript.src = './scripts/extensions/third-party/mobile/app/forum-app/forum-styles.js';
+            stylesScript.src = '/scripts/extensions/third-party/mobile/app/forum-app/forum-styles.js';
             stylesScript.onload = () => {
                 console.log('[Mobile Phone] forum-styles.js 加载完成');
                 checkComplete();
@@ -5696,7 +5766,7 @@ class MobilePhone {
 
             // 加载主UI JS文件
             const jsScript = document.createElement('script');
-            jsScript.src = './scripts/extensions/third-party/mobile/app/forum-app/forum-ui.js';
+            jsScript.src = '/scripts/extensions/third-party/mobile/app/forum-app/forum-ui.js';
             jsScript.onload = () => {
                 console.log('[Mobile Phone] forum-ui.js 加载完成');
                 checkComplete();
@@ -5706,7 +5776,7 @@ class MobilePhone {
 
             // 加载论坛控制应用 JS文件
             const controlScript = document.createElement('script');
-            controlScript.src = './scripts/extensions/third-party/mobile/app/forum-app/forum-control-app.js';
+            controlScript.src = '/scripts/extensions/third-party/mobile/app/forum-app/forum-control-app.js';
             controlScript.onload = () => {
                 console.log('[Mobile Phone] forum-control-app.js 加载完成');
                 checkComplete();
@@ -5716,7 +5786,7 @@ class MobilePhone {
 
             // 加载论坛自动监听器 JS文件
             const autoListenerScript = document.createElement('script');
-            autoListenerScript.src = './scripts/extensions/third-party/mobile/app/forum-app/forum-auto-listener.js';
+            autoListenerScript.src = '/scripts/extensions/third-party/mobile/app/forum-app/forum-auto-listener.js';
             autoListenerScript.onload = () => {
                 console.log('[Mobile Phone] forum-auto-listener.js 加载完成');
                 checkComplete();
@@ -5833,7 +5903,7 @@ class MobilePhone {
             // 加载CSS文件
             const cssLink = document.createElement('link');
             cssLink.rel = 'stylesheet';
-            cssLink.href = './scripts/extensions/third-party/mobile/app/weibo-app/weibo-ui.css';
+            cssLink.href = '/scripts/extensions/third-party/mobile/app/weibo-app/weibo-ui.css';
             cssLink.onload = () => {
                 console.log('[Mobile Phone] weibo-ui.css 加载完成');
                 checkComplete();
@@ -5844,7 +5914,7 @@ class MobilePhone {
             // 加载控制应用CSS文件
             const controlCssLink = document.createElement('link');
             controlCssLink.rel = 'stylesheet';
-            controlCssLink.href = './scripts/extensions/third-party/mobile/app/weibo-app/weibo-control-app.css';
+            controlCssLink.href = '/scripts/extensions/third-party/mobile/app/weibo-app/weibo-control-app.css';
             controlCssLink.onload = () => {
                 console.log('[Mobile Phone] weibo-control-app.css 加载完成');
                 checkComplete();
@@ -5854,7 +5924,7 @@ class MobilePhone {
 
             // 加载微博管理器 JS文件
             const managerScript = document.createElement('script');
-            managerScript.src = './scripts/extensions/third-party/mobile/app/weibo-app/weibo-manager.js';
+            managerScript.src = '/scripts/extensions/third-party/mobile/app/weibo-app/weibo-manager.js';
             managerScript.onload = () => {
                 console.log('[Mobile Phone] weibo-manager.js 加载完成');
                 checkComplete();
@@ -5864,7 +5934,7 @@ class MobilePhone {
 
             // 加载微博样式管理器 JS文件
             const stylesScript = document.createElement('script');
-            stylesScript.src = './scripts/extensions/third-party/mobile/app/weibo-app/weibo-styles.js';
+            stylesScript.src = '/scripts/extensions/third-party/mobile/app/weibo-app/weibo-styles.js';
             stylesScript.onload = () => {
                 console.log('[Mobile Phone] weibo-styles.js 加载完成');
                 // 验证是否正确创建了全局变量
@@ -5886,7 +5956,7 @@ class MobilePhone {
 
             // 加载微博样式修复脚本（确保 weiboStyles 可用）
             const fixScript = document.createElement('script');
-            fixScript.src = './scripts/extensions/third-party/mobile/weibo-styles-fix.js';
+            fixScript.src = '/scripts/extensions/third-party/mobile/weibo-styles-fix.js';
             fixScript.onload = () => {
                 console.log('[Mobile Phone] weibo-styles-fix.js 加载完成');
                 checkComplete();
@@ -5899,7 +5969,7 @@ class MobilePhone {
 
             // 加载主UI JS文件
             const jsScript = document.createElement('script');
-            jsScript.src = './scripts/extensions/third-party/mobile/app/weibo-app/weibo-ui.js';
+            jsScript.src = '/scripts/extensions/third-party/mobile/app/weibo-app/weibo-ui.js';
             jsScript.onload = () => {
                 console.log('[Mobile Phone] weibo-ui.js 加载完成');
                 checkComplete();
@@ -5909,7 +5979,7 @@ class MobilePhone {
 
             // 加载微博控制应用 JS文件
             const controlScript = document.createElement('script');
-            controlScript.src = './scripts/extensions/third-party/mobile/app/weibo-app/weibo-control-app.js';
+            controlScript.src = '/scripts/extensions/third-party/mobile/app/weibo-app/weibo-control-app.js';
             controlScript.onload = () => {
                 console.log('[Mobile Phone] weibo-control-app.js 加载完成');
                 checkComplete();
@@ -5919,7 +5989,7 @@ class MobilePhone {
 
             // 加载微博自动监听器 JS文件
             const autoListenerScript = document.createElement('script');
-            autoListenerScript.src = './scripts/extensions/third-party/mobile/app/weibo-app/weibo-auto-listener.js';
+            autoListenerScript.src = '/scripts/extensions/third-party/mobile/app/weibo-app/weibo-auto-listener.js';
             autoListenerScript.onload = () => {
                 console.log('[Mobile Phone] weibo-auto-listener.js 加载完成');
                 checkComplete();
@@ -6783,7 +6853,7 @@ class MobilePhone {
             // 加载CSS文件
             const cssLink = document.createElement('link');
             cssLink.rel = 'stylesheet';
-            cssLink.href = './scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-app.css';
+            cssLink.href = '/scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-app.css';
             cssLink.onload = () => {
                 console.log('[Mobile Phone] parallel-events-app.css 加载完成');
                 checkComplete();
@@ -6793,7 +6863,7 @@ class MobilePhone {
 
             // 加载风格管理器JS文件
             const stylesScript = document.createElement('script');
-            stylesScript.src = './scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-styles.js';
+            stylesScript.src = '/scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-styles.js';
             stylesScript.onload = () => {
                 console.log('[Mobile Phone] parallel-events-styles.js 加载完成');
                 console.log('[Mobile Phone] parallelEventsStyles 状态:', typeof window.parallelEventsStyles);
@@ -6804,7 +6874,7 @@ class MobilePhone {
 
             // 加载主JS文件
             const jsScript = document.createElement('script');
-            jsScript.src = './scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-app.js';
+            jsScript.src = '/scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-app.js';
             jsScript.onload = () => {
                 console.log('[Mobile Phone] parallel-events-app.js 加载完成');
                 console.log('[Mobile Phone] 全局变量状态:', {
@@ -6851,21 +6921,21 @@ class MobilePhone {
             // 加载CSS
             const css = document.createElement('link');
             css.rel = 'stylesheet';
-            css.href = './scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-app.css';
+            css.href = '/scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-app.css';
             css.onload = checkComplete;
             css.onerror = () => reject(new Error('CSS加载失败'));
             document.head.appendChild(css);
 
             // 加载样式JS
             const stylesJs = document.createElement('script');
-            stylesJs.src = './scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-styles.js';
+            stylesJs.src = '/scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-styles.js';
             stylesJs.onload = checkComplete;
             stylesJs.onerror = () => reject(new Error('样式JS加载失败'));
             document.head.appendChild(stylesJs);
 
             // 加载主JS
             const mainJs = document.createElement('script');
-            mainJs.src = './scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-app.js';
+            mainJs.src = '/scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-app.js';
             mainJs.onload = checkComplete;
             mainJs.onerror = () => reject(new Error('主JS加载失败'));
             document.head.appendChild(mainJs);
@@ -6938,7 +7008,7 @@ class MobilePhone {
             // 加载CSS文件
             const cssLink = document.createElement('link');
             cssLink.rel = 'stylesheet';
-            cssLink.href = './scripts/extensions/third-party/mobile/app/profile-app.css';
+            cssLink.href = '/scripts/extensions/third-party/mobile/app/profile-app.css';
             cssLink.onload = () => {
                 console.log('[Mobile Phone] profile-app.css 加载完成');
                 checkComplete();
@@ -6948,7 +7018,7 @@ class MobilePhone {
 
             // 加载JS文件
             const jsScript = document.createElement('script');
-            jsScript.src = './scripts/extensions/third-party/mobile/app/profile-app.js';
+            jsScript.src = '/scripts/extensions/third-party/mobile/app/profile-app.js';
             jsScript.onload = () => {
                 console.log('[Mobile Phone] profile-app.js 加载完成');
                 console.log('[Mobile Phone] 全局变量状态:', {
@@ -7433,3 +7503,25 @@ if (typeof MobilePhone !== 'undefined') {
 }
 
 } // end if (typeof MobilePhone !== 'undefined')
+
+// ============================================================
+// 加载 phone-loader.js（联动方案模块）
+// 在 mobile-phone.js 初始化完成后加载，不修改 index.js
+// ============================================================
+(function loadPhoneLoader() {
+  var loaderScript = document.createElement('script');
+  loaderScript.src = './scripts/extensions/third-party/mobile/phone-loader.js';
+  loaderScript.onload = function () {
+    console.log('[Mobile Phone] phone-loader.js 加载完成');
+    if (window.Phone && typeof window.Phone.load === 'function') {
+      window.Phone.load(function () {
+        console.log('[Mobile Phone] phone-loader 所有模块加载完成');
+      });
+    }
+  };
+  loaderScript.onerror = function (e) {
+    if (e && e.stopPropagation) e.stopPropagation();
+    console.warn('[Mobile Phone] phone-loader.js 加载失败');
+  };
+  document.head.appendChild(loaderScript);
+})();

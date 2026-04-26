@@ -1151,7 +1151,8 @@ if (typeof window.MessageRenderer === 'undefined') {
       // 对于群聊消息，number 字段包含群ID
       // 对于普通消息，number 字段包含好友ID
       let friendId = message.number || '';
-      const messageType = message.messageType || '';
+      const messageType = message.messageType || '';  // 消息方向：对方消息/我方消息
+      const msgType = message.msgType || '';  // 消息内容类型：图片/文字/语音/红包/表情包/附件
       const content = message.content || '';
 
       // 🔥 新增：尝试通过发送者姓名获取更精确的ID
@@ -1195,11 +1196,17 @@ if (typeof window.MessageRenderer === 'undefined') {
 
       // 🌟 特殊处理：图片消息（新增）
       if (
-        messageType === '图片' ||
+        msgType === '图片' ||
         content.includes('[图片:') ||
         (message.detailedContent && message.detailedContent.includes('<img'))
       ) {
         const imageContent = message.detailedContent || content;
+
+        // 如果 imageContent 是纯URL（没有HTML标签），包装为img标签
+        var finalImageContent = imageContent;
+        if (imageContent && !imageContent.includes('<') && /^https?:\/\//i.test(imageContent)) {
+          finalImageContent = '<img src="' + imageContent + '" style="max-width:100%;border-radius:8px;" onerror="this.style.display=\'none\';this.parentElement.innerHTML=\'<span style=color:#999>图片加载失败</span>\'" />';
+        }
 
         // 为接收的图片消息创建特殊布局
         if (!isMine && !isMyGroupMessage) {
@@ -1216,7 +1223,7 @@ if (typeof window.MessageRenderer === 'undefined') {
                             ${isGroupMessage ? '<span class="group-badge">群聊</span>' : ''}
                         </div>
                             <div class="image-message-content">
-                                ${imageContent}
+                                ${finalImageContent}
                             </div>
                         </div>
                     </div>
@@ -1237,7 +1244,7 @@ if (typeof window.MessageRenderer === 'undefined') {
                         ${isGroupMessage ? '<span class="group-badge">群聊</span>' : ''}
                     </div>
                         <div class="image-message-content">
-                            ${imageContent}
+                            ${finalImageContent}
                         </div>
                     </div>
                 </div>
@@ -1245,7 +1252,7 @@ if (typeof window.MessageRenderer === 'undefined') {
       }
 
       // 🌟 新增：特殊处理附件消息（包括图片附件）
-      if (messageType === '附件' && content) {
+      if (msgType === '附件' && content) {
         let processedContent = content;
 
         // 检查是否是图片附件，如果是，解析并渲染为img标签
@@ -1357,7 +1364,7 @@ if (typeof window.MessageRenderer === 'undefined') {
       }
 
       // 🌟 特殊处理：表情包消息
-      if (messageType === '表情包' && content) {
+      if (msgType === '表情包' && content) {
         // 为接收的表情包消息创建特殊布局
         if (!isMine && !isMyGroupMessage) {
           return `

@@ -896,12 +896,24 @@ if (typeof window.WatchLiveApp === 'undefined') {
           return;
         }
 
-        // 发送继续直播消息到SillyTavern
+        // 通过手机内部AI生成直播互动内容（不触发ST）
         const message = `用户继续直播，互动为（${interaction}），请按照正确的直播格式要求生成本场人数，直播内容，弹幕，打赏和推荐互动。此次回复内仅生成一次本场人数和直播内容格式，直播内容需要简洁。最后需要生成四条推荐互动。禁止使用错误格式。`;
 
-        await this.sendToSillyTavern(message);
+        const result = await this.generateViaPhoneAI(message);
 
-        console.log('[Live App] 互动消息已发送');
+        // 解析AI生成的直播数据并更新状态
+        if (result) {
+          const liveData = this.dataParser.parseLiveData(result);
+          this.stateManager.updateLiveData(liveData);
+          console.log('[Watch Live App] AI生成互动数据已解析:', {
+            viewerCount: liveData.viewerCount,
+            danmakuCount: liveData.danmakuList.length,
+            giftCount: liveData.giftList.length,
+          });
+          this.updateAppContentDebounced();
+        }
+
+        console.log('[Watch Live App] 互动消息已生成');
       } catch (error) {
         console.error('[Live App] 继续互动失败:', error);
         this.showToast('发送互动失败: ' + error.message, 'error');
@@ -1817,19 +1829,42 @@ if (typeof window.WatchLiveApp === 'undefined') {
           console.log('[Watch Live App] 没有找到现有直播间数据');
         }
 
-        // 然后发送请求获取新的直播间列表
+        // 然后通过手机内部AI获取新的直播间列表（不触发ST）
         const message =
           '用户希望观看直播，请按照正确格式生成5-10个当前可能正在开播的直播间，每个直播间的格式为[直播|直播间名称|主播用户名|直播类别|观看人数]。主播可能是角色，NPC或者是无关路人。每个直播间格式之间需要正确换行';
 
-        // 设置等待状态，准备接收新回复
+        // 设置等待状态
         this.isWaitingForLiveList = true;
 
         // 开始监听AI回复
         this.eventListener.startListening();
 
-        await this.sendToSillyTavern(message);
+        const result = await this.generateViaPhoneAI(message);
 
-        console.log('[Watch Live App] 已发送开播列表请求，等待AI回复以更新列表...');
+        // 解析AI生成的直播间列表
+        if (result) {
+          const liveRoomRegex = /\[直播\|([^|\]]+)\|([^|\]]+)\|([^|\]]+)\|([^|\]]+)\]/g;
+          const rooms = [];
+          let match;
+          while ((match = liveRoomRegex.exec(result)) !== null) {
+            const roomData = {
+              name: match[1].trim(),
+              streamer: match[2].trim(),
+              category: match[3].trim(),
+              viewers: match[4].trim(),
+            };
+            if (roomData.name && roomData.streamer && roomData.category && roomData.viewers) {
+              rooms.push(roomData);
+            }
+          }
+          if (rooms.length > 0) {
+            console.log(`[Watch Live App] AI生成直播间列表成功，共 ${rooms.length} 个`);
+            this.updateAppContent();
+          }
+        }
+
+        this.isWaitingForLiveList = false;
+        console.log('[Watch Live App] 已获取开播列表...');
       } catch (error) {
         console.error('[Watch Live App] 请求开播列表失败:', error);
         this.showToast('请求开播列表失败: ' + error.message, 'error');
@@ -1901,7 +1936,18 @@ if (typeof window.WatchLiveApp === 'undefined') {
         this.stateManager.startLive();
         this.eventListener.startListening();
 
-        await this.sendToSillyTavern(message);
+        const result = await this.generateViaPhoneAI(message);
+
+        // 解析AI生成的直播数据并更新状态
+        if (result) {
+          const liveData = this.dataParser.parseLiveData(result);
+          this.stateManager.updateLiveData(liveData);
+          console.log('[Watch Live App] AI生成直播数据已解析:', {
+            viewerCount: liveData.viewerCount,
+            danmakuCount: liveData.danmakuList.length,
+          });
+        }
+
         this.updateAppContent();
 
         console.log('[Watch Live App] 已进入指定直播间');
@@ -1985,7 +2031,18 @@ if (typeof window.WatchLiveApp === 'undefined') {
         this.stateManager.startLive();
         this.eventListener.startListening();
 
-        await this.sendToSillyTavern(message);
+        const result = await this.generateViaPhoneAI(message);
+
+        // 解析AI生成的直播数据并更新状态
+        if (result) {
+          const liveData = this.dataParser.parseLiveData(result);
+          this.stateManager.updateLiveData(liveData);
+          console.log('[Watch Live App] AI生成直播数据已解析:', {
+            viewerCount: liveData.viewerCount,
+            danmakuCount: liveData.danmakuList.length,
+          });
+        }
+
         this.updateAppContent();
 
         console.log('[Watch Live App] 已进入选中的直播间');
@@ -2005,8 +2062,16 @@ if (typeof window.WatchLiveApp === 'undefined') {
         const message = `用户正在观看直播，并发送弹幕"${danmaku}"，请勿重复或替用户发送弹幕。请按照正确的直播格式要求生成本场人数，直播内容，其余弹幕，打赏和推荐互动。此次回复内仅生成一次本场人数和直播内容格式，直播内容需要简洁。最后需要生成四条推荐互动，内容为用户可能会发送的弹幕。禁止使用错误格式。
 [直播|{{user}}|弹幕|${danmaku}]`;
 
-        await this.sendToSillyTavern(message);
-        console.log('[Watch Live App] 推荐弹幕已发送');
+        const result = await this.generateViaPhoneAI(message);
+
+        // 解析AI生成的直播数据并更新状态
+        if (result) {
+          const liveData = this.dataParser.parseLiveData(result);
+          this.stateManager.updateLiveData(liveData);
+          this.updateAppContentDebounced();
+        }
+
+        console.log('[Watch Live App] 推荐弹幕已生成');
       } catch (error) {
         console.error('[Watch Live App] 发送推荐弹幕失败:', error);
         this.showToast('发送弹幕失败: ' + error.message, 'error');
@@ -2023,8 +2088,16 @@ if (typeof window.WatchLiveApp === 'undefined') {
         const message = `用户正在观看直播，并发送弹幕"${danmaku}"，请勿重复或替用户发送弹幕。请按照正确的直播格式要求生成本场人数，直播内容，其余弹幕，打赏和推荐互动。此次回复内仅生成一次本场人数和直播内容格式，直播内容需要简洁。最后需要生成四条推荐互动，内容为用户可能会发送的弹幕。禁止使用错误格式。
 [直播|{{user}}|弹幕|${danmaku}]`;
 
-        await this.sendToSillyTavern(message);
-        console.log('[Watch Live App] 自定义弹幕已发送');
+        const result = await this.generateViaPhoneAI(message);
+
+        // 解析AI生成的直播数据并更新状态
+        if (result) {
+          const liveData = this.dataParser.parseLiveData(result);
+          this.stateManager.updateLiveData(liveData);
+          this.updateAppContentDebounced();
+        }
+
+        console.log('[Watch Live App] 自定义弹幕已生成');
       } catch (error) {
         console.error('[Watch Live App] 发送自定义弹幕失败:', error);
         this.showToast('发送弹幕失败: ' + error.message, 'error');
@@ -2168,7 +2241,14 @@ if (typeof window.WatchLiveApp === 'undefined') {
           message += `[直播|{{user}}|弹幕|${giftMessage}]`;
         }
 
-        await this.sendToSillyTavern(message);
+        const result = await this.generateViaPhoneAI(message);
+
+        // 解析AI生成的直播数据并更新状态
+        if (result) {
+          const liveData = this.dataParser.parseLiveData(result);
+          this.stateManager.updateLiveData(liveData);
+          this.updateAppContentDebounced();
+        }
 
         // 重置礼物选择
         this.resetGiftModal();
@@ -2363,9 +2443,81 @@ if (typeof window.WatchLiveApp === 'undefined') {
     }
 
     /**
-     * 发送消息到SillyTavern
+     * 通过手机内部独立AI生成内容（不触发ST聊天）
+     * @param {string} message - 发送给AI的消息/提示词
+     * @returns {Promise<string>} AI生成的文本内容
      */
-    async sendToSillyTavern(message) {
+    async generateViaPhoneAI(message) {
+      try {
+        console.log('[Watch Live App] 通过手机内部AI生成内容...');
+
+        // 方式1: 使用 RoleAPI
+        if (window.RoleAPI && typeof window.RoleAPI.isEnabled === 'function' && window.RoleAPI.isEnabled()) {
+          console.log('[Watch Live App] 使用 RoleAPI 生成');
+          try {
+            const response = await window.RoleAPI.sendMessage('__watch_live_app__', 'watch_live_app', message, { silent: true });
+            if (response && response.success && response.text) {
+              console.log('[Watch Live App] RoleAPI 生成成功，长度:', response.text.length);
+              return response.text;
+            }
+          } catch (e) {
+            console.warn('[Watch Live App] RoleAPI 失败:', e.message);
+          }
+          console.warn('[Watch Live App] RoleAPI 返回无内容，尝试下一个方式');
+        }
+
+        // 方式2: 使用 XBBridge.generate（非流式）
+        if (window.XBBridge && typeof window.XBBridge.isAvailable === 'function' && window.XBBridge.isAvailable()) {
+          console.log('[Watch Live App] 使用 XBBridge.generate 生成');
+          const messages = [
+            { role: 'user', content: message }
+          ];
+          const result = await window.XBBridge.generate.generate({
+            provider: 'inherit',
+            messages: messages,
+            max_tokens: 2000,
+            temperature: 0.8,
+          });
+          if (result && result.text) {
+            console.log('[Watch Live App] XBBridge 生成成功，长度:', result.text.length);
+            return result.text;
+          }
+          if (result && typeof result === 'string') {
+            console.log('[Watch Live App] XBBridge 生成成功（字符串），长度:', result.length);
+            return result;
+          }
+          console.warn('[Watch Live App] XBBridge 返回无内容，尝试下一个方式');
+        }
+
+        // 方式3: 使用 mobileCustomAPIConfig
+        if (window.mobileCustomAPIConfig && typeof window.mobileCustomAPIConfig.isAPIAvailable === 'function' && window.mobileCustomAPIConfig.isAPIAvailable()) {
+          console.log('[Watch Live App] 使用 mobileCustomAPIConfig 生成');
+          const messages = [
+            { role: 'user', content: message }
+          ];
+          const response = await window.mobileCustomAPIConfig.callAPI(messages, {
+            temperature: 0.8,
+            max_tokens: 2000,
+          });
+          if (response && response.content) {
+            console.log('[Watch Live App] mobileCustomAPIConfig 生成成功，长度:', response.content.length);
+            return response.content;
+          }
+          console.warn('[Watch Live App] mobileCustomAPIConfig 返回无内容');
+        }
+
+        throw new Error('没有可用的AI生成方式（RoleAPI、XBBridge、mobileCustomAPIConfig 均不可用）');
+      } catch (error) {
+        console.error('[Watch Live App] 手机内部AI生成失败:', error);
+        throw error;
+      }
+    }
+
+    /**
+     * @deprecated 此方法已废弃，不再使用。保留仅用于向后兼容。
+     * 发送消息到SillyTavern（保留方法，但直播功能不再调用）
+     */
+    async _sendToSillyTavernDeprecated(message) {
       try {
         console.log('[Live App] 发送消息到SillyTavern:', message);
 

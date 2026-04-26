@@ -137,7 +137,7 @@ class MobilePerformanceTester {
 
         const testModules = [
             {
-                src: './scripts/extensions/third-party/mobile/context-monitor.js',
+                src: window.MOBILE_BASE_PATH + 'context-monitor.js',
                 name: 'test-context-monitor',
                 required: true
             }

@@ -31,24 +31,68 @@ if (typeof window.FriendRenderer === 'undefined') {
     extractFriendsFromContext() {
       this.extractedFriends = [];
 
-      // 检查移动端上下文编辑器是否可用
-      if (!window.mobileContextEditor) {
-        console.warn('[Friend Renderer] 移动端上下文编辑器未加载');
-        return [];
-      }
-
-      // 检查SillyTavern是否准备就绪
-      if (!window.mobileContextEditor.isSillyTavernReady()) {
-        console.warn('[Friend Renderer] SillyTavern未准备就绪');
-        return [];
-      }
-
+      // ===== 优先从小白X变量读取好友列表（不污染ST上下文） =====
+      var varFriendsLoaded = false;
       try {
+        if (window.BridgeAPI && window.BridgeAPI.ConfigManager) {
+          var friendsListStr = window.BridgeAPI.ConfigManager.getSync
+            ? window.BridgeAPI.ConfigManager.getSync('xb.phone.friends.list')
+            : null;
+          if (!friendsListStr && window.BridgeAPI.ConfigManager.get) {
+            // 同步方式不可用时，尝试从缓存读取
+            friendsListStr = window.BridgeAPI._varCache
+              ? window.BridgeAPI._varCache['xb.phone.friends.list']
+              : null;
+          }
+          if (friendsListStr) {
+            var friendsList = JSON.parse(friendsListStr);
+            if (Array.isArray(friendsList) && friendsList.length > 0) {
+              console.log('[Friend Renderer] 从小白X变量加载好友列表:', friendsList.length, '个');
+              friendsList.forEach(function(f) {
+                var friendKey = 'friend_var_' + f.name + '_' + f.number;
+                this.extractedFriends.push({
+                  type: 'friend',
+                  name: f.name,
+                  number: String(f.number),
+                  messageIndex: -1,
+                  addTime: f.addTime || Date.now(),
+                  isGroup: false,
+                  source: 'variable'
+                });
+              }.bind(this));
+              varFriendsLoaded = true;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[Friend Renderer] 从变量读取好友列表失败:', e);
+      }
+
+      // ===== 从ST聊天记录提取好友（备用/向后兼容） =====
+      try {
+        // 检查移动端上下文编辑器是否可用
+        if (!window.mobileContextEditor) {
+          if (!varFriendsLoaded) {
+            console.warn('[Friend Renderer] 移动端上下文编辑器未加载');
+          }
+          return this.extractedFriends;
+        }
+
+        // 检查SillyTavern是否准备就绪
+        if (!window.mobileContextEditor.isSillyTavernReady()) {
+          if (!varFriendsLoaded) {
+            console.warn('[Friend Renderer] SillyTavern未准备就绪');
+          }
+          return this.extractedFriends;
+        }
+
         // 获取上下文数据
         const context = window.SillyTavern.getContext();
         if (!context || !context.chat || !Array.isArray(context.chat)) {
-          console.warn('[Friend Renderer] 聊天数据不可用');
-          return [];
+          if (!varFriendsLoaded) {
+            console.warn('[Friend Renderer] 聊天数据不可用');
+          }
+          return this.extractedFriends;
         }
 
         // 遍历所有消息，提取好友和群聊信息
@@ -712,6 +756,18 @@ if (typeof window.FriendRenderer === 'undefined') {
       addTime: Date.now(),
       isGroup: false
     });
+
+    // 如果 WorldbookContact 可用，缓存联系人信息
+    if (window.WorldbookContact && window.WorldbookContact._contactCache) {
+      if (!window.WorldbookContact._contactCache[number]) {
+        window.WorldbookContact._contactCache[number] = {
+          name: name,
+          friendId: number,
+          addedAt: Date.now()
+        };
+      }
+    }
+
     try { this.refresh(); } catch(e) { /* refresh may fail if context not ready */ }
     console.log('[FriendRenderer] Added friend:', name, number);
     return true;

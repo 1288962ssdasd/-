@@ -117,6 +117,15 @@ if (typeof window.MessageSender === 'undefined') {
       try {
         console.log('[Message Sender] 尝试发送消息到SillyTavern:', message);
 
+        // 转义消息中的 / 字符，避免触发ST的斜杠命令解析器
+        // ES5兼容写法：用占位符保护已转义的 \/ 和 URL中的 ://
+        var temp = message.replace(/\\\//g, '\x00ESCAPED_SLASH\x00');
+        temp = temp.replace(/:\/\//g, '\x00URL_SLASH\x00');
+        temp = temp.replace(/\//g, '\\/');
+        temp = temp.replace(/\x00ESCAPED_SLASH\x00/g, '\\/');
+        temp = temp.replace(/\x00URL_SLASH\x00/g, '://');
+        message = temp;
+
         // 方法1: 直接使用DOM元素
         const originalInput = document.getElementById('send_textarea');
         const sendButton = document.getElementById('send_but');
@@ -175,6 +184,14 @@ if (typeof window.MessageSender === 'undefined') {
     async sendToChatBackup(message) {
       try {
         console.log('[Message Sender] 尝试备用发送方法:', message);
+
+        // 转义 / 字符（ES5兼容写法）
+        var temp = message.replace(/\\\//g, '\x00ESCAPED_SLASH\x00');
+        temp = temp.replace(/:\/\//g, '\x00URL_SLASH\x00');
+        temp = temp.replace(/\//g, '\\/');
+        temp = temp.replace(/\x00ESCAPED_SLASH\x00/g, '\\/');
+        temp = temp.replace(/\x00URL_SLASH\x00/g, '://');
+        message = temp;
 
         // 尝试查找其他可能的输入框
         const textareas = document.querySelectorAll('textarea');
@@ -575,7 +592,11 @@ if (typeof window.MessageSender === 'undefined') {
 
       try {
         // Check independent AI mode
-        if (window.independentAI && window.independentAI.isEnabled()) {
+        var independentEnabled = window.independentAI && window.independentAI.isEnabled();
+        console.log('[Message Sender] independentAI.isEnabled():', independentEnabled,
+          '| RoleAPI exists:', !!window.RoleAPI,
+          '| API config:', window.RoleAPI ? window.RoleAPI.getAPIConfig() : 'N/A');
+        if (independentEnabled) {
           console.log('[Message Sender] Using independent AI mode');
           this.setSendingState(true);
 
@@ -619,8 +640,9 @@ if (typeof window.MessageSender === 'undefined') {
           }
 
           // Send text content to independent AI (strip tag wrapper for AI context)
+          // 三级降级策略：RoleAPI -> XBBridge -> mobileCustomAPIConfig
           const aiMessage = tagMatch ? msgType + ': ' + msgContent : message;
-          const result = await window.independentAI.sendMessage(
+          var result = await this._sendViaPhoneAI(
             this.currentFriendName,
             this.currentFriendId,
             aiMessage,
@@ -655,6 +677,122 @@ if (typeof window.MessageSender === 'undefined') {
       } finally {
         this.setSendingState(false);
       }
+    }
+
+    /**
+     * 三级降级策略发送消息到AI（不触发ST聊天）
+     * 降级顺序：RoleAPI -> XBBridge -> mobileCustomAPIConfig
+     * @param {string} friendName - 好友名称
+     * @param {string} friendId - 好友ID
+     * @param {string} userMessage - 用户消息
+     * @param {Object} meta - 消息元数据
+     * @returns {Promise<{success: boolean, text?: string, error?: string}>}
+     */
+    async _sendViaPhoneAI(friendName, friendId, userMessage, meta) {
+      // 方式1: 使用 RoleAPI（独立AI模式）
+      if (window.independentAI && typeof window.independentAI.isEnabled === 'function' && window.independentAI.isEnabled()) {
+        console.log('[Message Sender] 三级降级: 尝试 RoleAPI');
+        try {
+          var result = await window.independentAI.sendMessage(friendName, friendId, userMessage, meta);
+          if (result && result.success) {
+            console.log('[Message Sender] RoleAPI 成功');
+            return result;
+          }
+          console.warn('[Message Sender] RoleAPI 返回失败:', result ? result.error : '无结果');
+        } catch (e) {
+          console.warn('[Message Sender] RoleAPI 异常:', e.message);
+        }
+      }
+
+      // 方式2: 使用 XBBridge（小白X宿主）
+      if (window.XBBridge && typeof window.XBBridge.isAvailable === 'function' && window.XBBridge.isAvailable()) {
+        console.log('[Message Sender] 三级降级: 尝试 XBBridge');
+        try {
+          var systemPrompt = '';
+          if (window.RoleAPI && typeof window.RoleAPI.buildSystemPrompt === 'function') {
+            systemPrompt = await window.RoleAPI.buildSystemPrompt(friendName, friendId);
+          }
+          var messages = [];
+          if (systemPrompt) {
+            messages.push({ role: 'system', content: systemPrompt });
+          }
+          // 添加历史消息
+          if (window.RoleAPI && window.RoleAPI.chatHistories && window.RoleAPI.chatHistories[friendId]) {
+            var history = window.RoleAPI.chatHistories[friendId];
+            for (var i = 0; i < history.length; i++) {
+              messages.push({ role: history[i].role, content: history[i].content });
+            }
+          }
+          messages.push({ role: 'user', content: userMessage });
+
+          var xbResult = await window.XBBridge.generate.generate({
+            provider: 'inherit',
+            messages: messages,
+            max_tokens: 300,
+            temperature: 0.8
+          });
+          var replyText = '';
+          if (xbResult && xbResult.text) {
+            replyText = xbResult.text;
+          } else if (typeof xbResult === 'string') {
+            replyText = xbResult;
+          }
+          if (replyText) {
+            console.log('[Message Sender] XBBridge 成功，长度:', replyText.length);
+            // 渲染回复气泡
+            if (window.RoleAPI) {
+              window.RoleAPI.addToHistory(friendId, 'user', userMessage, meta);
+              window.RoleAPI.addToHistory(friendId, 'assistant', replyText, null);
+            }
+            if (window.RoleAPI && typeof window.RoleAPI.createStreamBubble === 'function') {
+              var bubbleEl = window.RoleAPI.createStreamBubble(friendName, friendId);
+              window.RoleAPI.updateStreamBubble(bubbleEl, replyText);
+              window.RoleAPI.finalizeStreamBubble(bubbleEl, replyText, friendName, friendId);
+            }
+            return { success: true, text: replyText };
+          }
+          console.warn('[Message Sender] XBBridge 返回无内容');
+        } catch (e) {
+          console.warn('[Message Sender] XBBridge 异常:', e.message);
+        }
+      }
+
+      // 方式3: 使用 mobileCustomAPIConfig
+      if (window.mobileCustomAPIConfig && typeof window.mobileCustomAPIConfig.isAPIAvailable === 'function' && window.mobileCustomAPIConfig.isAPIAvailable()) {
+        console.log('[Message Sender] 三级降级: 尝试 mobileCustomAPIConfig');
+        try {
+          var messages3 = [];
+          if (window.RoleAPI && typeof window.RoleAPI.buildSystemPrompt === 'function') {
+            var sp = await window.RoleAPI.buildSystemPrompt(friendName, friendId);
+            if (sp) messages3.push({ role: 'system', content: sp });
+          }
+          messages3.push({ role: 'user', content: userMessage });
+
+          var response = await window.mobileCustomAPIConfig.callAPI(messages3, {
+            temperature: 0.8,
+            max_tokens: 300
+          });
+          if (response && response.content) {
+            console.log('[Message Sender] mobileCustomAPIConfig 成功，长度:', response.content.length);
+            if (window.RoleAPI) {
+              window.RoleAPI.addToHistory(friendId, 'user', userMessage, meta);
+              window.RoleAPI.addToHistory(friendId, 'assistant', response.content, null);
+            }
+            if (window.RoleAPI && typeof window.RoleAPI.createStreamBubble === 'function') {
+              var bubbleEl2 = window.RoleAPI.createStreamBubble(friendName, friendId);
+              window.RoleAPI.updateStreamBubble(bubbleEl2, response.content);
+              window.RoleAPI.finalizeStreamBubble(bubbleEl2, response.content, friendName, friendId);
+            }
+            return { success: true, text: response.content };
+          }
+          console.warn('[Message Sender] mobileCustomAPIConfig 返回无内容');
+        } catch (e) {
+          console.warn('[Message Sender] mobileCustomAPIConfig 异常:', e.message);
+        }
+      }
+
+      console.error('[Message Sender] 三级降级全部失败：RoleAPI、XBBridge、mobileCustomAPIConfig 均不可用');
+      return { success: false, error: '没有可用的AI生成方式，请检查API配置' };
     }
 
     /**

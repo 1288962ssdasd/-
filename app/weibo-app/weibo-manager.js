@@ -137,7 +137,7 @@ if (typeof window.WeiboManager !== 'undefined') {
               console.log('[Weibo Manager] 🔄 WeiboStyles 类不存在，尝试动态加载 weibo-styles.js...');
               try {
                 const script = document.createElement('script');
-                script.src = './scripts/extensions/third-party/mobile/app/weibo-app/weibo-styles.js';
+                script.src = '/scripts/extensions/third-party/mobile/app/weibo-app/weibo-styles.js';
                 script.async = false; // 同步加载
 
                 // 使用 Promise 等待加载完成

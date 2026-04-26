@@ -1094,11 +1094,42 @@ if (typeof window.BackpackApp === 'undefined') {
         const method = modal.querySelector('#useMethod').value.trim();
 
         try {
-          // 生成消息
-          const message = await this.generateUseMessageWithContext(item, target, method, currentQuantity);
-          this.sendToSillyTavern(message);
+          // 生成使用描述消息（用于AI生成效果描述）
+          const useMessage = this.generateUseMessage(item, target, method, currentQuantity);
 
-          this.showToast(`使用了 ${currentQuantity} 个 ${item.name}`, 'success');
+          // 通过手机内部AI生成物品使用效果描述（不发送到ST）
+          const aiDescription = await this.generateViaPhoneAI(
+            `角色使用了物品"${item.name}"（${item.description}），对${target || '自己'}使用，用法为${method || '直接使用'}，数量${currentQuantity}。请用1-2句话描述使用后的效果。只返回效果描述文字，不要其他内容。`
+          );
+
+          if (aiDescription) {
+            this.showToast(`使用了 ${currentQuantity} 个 ${item.name}: ${aiDescription}`, 'success');
+          } else {
+            this.showToast(`使用了 ${currentQuantity} 个 ${item.name}`, 'success');
+          }
+
+          // 通过BridgeAPI设置小白X变量，通知ST物品使用信息（如需要影响角色状态）
+          if (window.BridgeAPI && window.BridgeAPI.configManager && typeof window.BridgeAPI.configManager.setVar === 'function') {
+            try {
+              const itemInfo = {
+                name: item.name,
+                type: item.type,
+                description: item.description,
+                quantity: currentQuantity,
+                target: target || '自己',
+                method: method || '直接使用',
+                effect: aiDescription || '未知效果',
+                timestamp: Date.now()
+              };
+              window.BridgeAPI.configManager.setVar('xb.phone.backpack.lastUsed', JSON.stringify(itemInfo));
+              console.log('[BackpackApp] 已通过BridgeAPI设置物品使用变量');
+            } catch (bridgeError) {
+              console.warn('[BackpackApp] BridgeAPI设置变量失败:', bridgeError);
+            }
+          }
+
+          // 更新上下文中的背包物品格式（减少数量）
+          await this.updateBackpackItemInContext(item, currentQuantity);
 
           // 关闭弹窗
           modal.remove();
@@ -1108,7 +1139,7 @@ if (typeof window.BackpackApp === 'undefined') {
             this.parseItemsFromContext();
           }, 500);
         } catch (error) {
-          console.error('[Backpack App] 使用物品失败:', error);
+          console.error('[BackpackApp] 使用物品失败:', error);
           this.showToast('使用物品失败: ' + error.message, 'error');
         }
       });
@@ -1351,8 +1382,49 @@ if (typeof window.BackpackApp === 'undefined') {
       }
     }
 
-    // 统一的发送消息方法（参考shop-app的发送方式）
-    async sendToSillyTavern(message) {
+    // 通过手机内部独立AI生成内容（不操作ST的DOM）
+    async generateViaPhoneAI(message) {
+        // 方法1：使用自定义API配置
+        if (window.mobileCustomAPIConfig && window.mobileCustomAPIConfig.isAPIAvailable && window.mobileCustomAPIConfig.isAPIAvailable()) {
+            try {
+                const messages = [{ role: 'user', content: message }];
+                const result = await window.mobileCustomAPIConfig.callAPI(messages, { temperature: 0.8, maxTokens: 500 });
+                if (typeof result === 'string') return result;
+                if (result && result.choices && result.choices[0]) return result.choices[0].message.content;
+            } catch (e) {
+                console.warn('[BackpackApp] customAPI failed:', e);
+            }
+        }
+        // 方法2：使用RoleAPI
+        if (window.RoleAPI && window.RoleAPI.isEnabled && window.RoleAPI.isEnabled()) {
+            try {
+                const result = await window.RoleAPI.sendMessage('system', 'system', message, { skipHistory: true });
+                if (result) return result;
+            } catch (e) {
+                console.warn('[BackpackApp] RoleAPI failed:', e);
+            }
+        }
+        // 方法3：使用XBBridge（非流式）
+        if (window.XBBridge && window.XBBridge.isAvailable && window.XBBridge.isAvailable()) {
+            try {
+                const result = await new Promise((resolve, reject) => {
+                    window.XBBridge.generate.generate({ prompt: message }, (response) => {
+                        resolve(response);
+                    }, (error) => {
+                        reject(error);
+                    });
+                });
+                if (result) return result;
+            } catch (e) {
+                console.warn('[BackpackApp] XBBridge failed:', e);
+            }
+        }
+        console.warn('[BackpackApp] 所有AI后端不可用');
+        return null;
+    }
+
+    // [已废弃] 统一的发送消息方法 - 不再主动调用，保留仅供兼容
+    async _sendToSillyTavernDeprecated(message) {
       try {
         console.log('[Backpack App] 🔄 发送消息到SillyTavern:', message);
 
@@ -1397,8 +1469,8 @@ if (typeof window.BackpackApp === 'undefined') {
       }
     }
 
-    // 备用发送方法
-    async sendToSillyTavernBackup(message) {
+    // [已废弃] 备用发送方法 - 不再主动调用，保留仅供兼容
+    async _sendToSillyTavernBackupDeprecated(message) {
       try {
         console.log('[Backpack App] 尝试备用发送方法:', message);
 

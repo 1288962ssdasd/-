@@ -84,7 +84,7 @@ class AppLoader {
 
     // 获取模块URL
     getModuleUrl(moduleName) {
-        const baseUrl = 'scripts/extensions/third-party/mobile/app/';
+        const baseUrl = '/scripts/extensions/third-party/mobile/app/';
         const moduleUrls = {
             'context-monitor': baseUrl + 'context-monitor.js',
             'friend-renderer': baseUrl + 'friend-renderer.js',

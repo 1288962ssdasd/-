@@ -12,7 +12,7 @@
     const MOBILE_MODULES = [
         {
             name: 'real-time-sync',
-            path: 'scripts/extensions/third-party/mobile/app/real-time-sync.js',
+            path: window.MOBILE_BASE_PATH + 'app/real-time-sync.js',
             dependencies: []
         }
     ];

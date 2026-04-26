@@ -137,7 +137,6 @@
 }
 
 .message-detail.message-sent {
-  color: white;
   margin: 8px 0 !important; /* 增加用户消息的上下间距到8px */
   margin-left: auto;
   margin-right: 0; /* 确保完全靠右 */
@@ -1219,6 +1218,12 @@
 
 .message-type {
   display: none !important;
+}
+
+/* 红包消息文字颜色例外 - 确保红包文字保持白色 */
+.message-received[title='红包'],
+.message-sent[title='红包'] {
+  color: white !important;
 }
 
 /* 红包消息专用样式 */

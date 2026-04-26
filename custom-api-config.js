@@ -10,6 +10,20 @@
  * 移植自论坛应用和real-time-status-bar插件的API配置功能
  */
 class MobileCustomAPIConfig {
+    /**
+     * 场景名称映射（中文）
+     */
+    static PROFILE_NAMES = {
+        chat: '消息聊天',
+        weibo: '微博动态',
+        forum: '论坛帖子',
+        live: '直播互动',
+        friends: '朋友圈',
+        shop: '商店',
+        task: '任务',
+        backpack: '背包'
+    };
+
     constructor() {
         this.isInitialized = false;
         this.currentSettings = this.getDefaultSettings();
@@ -43,7 +57,18 @@ class MobileCustomAPIConfig {
             // 高级设置
             customHeaders: {},
             systemPrompt: '',
-            streamEnabled: false
+            streamEnabled: false,
+            // 场景预设
+            profiles: {
+                chat: { model: '', temperature: 0.8, maxTokens: 500, systemPrompt: '' },
+                weibo: { model: '', temperature: 1.0, maxTokens: 300, systemPrompt: '' },
+                forum: { model: '', temperature: 0.7, maxTokens: 400, systemPrompt: '' },
+                live: { model: '', temperature: 0.9, maxTokens: 300, systemPrompt: '' },
+                friends: { model: '', temperature: 0.8, maxTokens: 300, systemPrompt: '' },
+                shop: { model: '', temperature: 0.7, maxTokens: 500, systemPrompt: '' },
+                task: { model: '', temperature: 0.7, maxTokens: 400, systemPrompt: '' },
+                backpack: { model: '', temperature: 0.8, maxTokens: 300, systemPrompt: '' }
+            }
         };
     }
 
@@ -381,6 +406,92 @@ class MobileCustomAPIConfig {
                     </div>
                 </details>
 
+                <!-- 场景预设 -->
+                <details style="margin-bottom: 15px;">
+                    <summary style="cursor: pointer; font-weight: 500; margin-bottom: 10px;color: #000;">🎭 场景预设</summary>
+
+                    <div id="profile-presets-container" style="margin-left: 5px;">
+                        ${Object.entries(MobileCustomAPIConfig.PROFILE_NAMES).map(([key, name]) => {
+                            const profile = (settings.profiles && settings.profiles[key]) || {};
+                            return `
+                                <details style="margin-bottom: 8px; border: 1px solid #e9ecef; border-radius: 5px; padding: 5px;">
+                                    <summary style="cursor: pointer; font-size: 14px; font-weight: 500; color: #333; padding: 3px 0;">${name}</summary>
+                                    <div style="margin-top: 8px; margin-left: 10px;">
+                                        <div style="margin-bottom: 6px;">
+                                            <label style="display: block; margin-bottom: 3px; font-size: 12px; color: #666;">模型:</label>
+                                            <input type="text" id="profile-${key}-model" placeholder="留空使用基础模型"
+                                                   value="${profile.model || ''}"
+                                                   style="width: 100%; padding: 5px; border: 1px solid #ddd; border-radius: 3px; font-size: 13px; box-sizing: border-box;background-color: #fff;color: #000;">
+                                        </div>
+                                        <div style="margin-bottom: 6px;">
+                                            <label style="display: block; margin-bottom: 3px; font-size: 12px; color: #666;">温度 (0-2):</label>
+                                            <div style="display: flex; align-items: center; gap: 8px;">
+                                                <input type="range" id="profile-${key}-temperature" min="0" max="2" step="0.1"
+                                                       value="${profile.temperature !== undefined ? profile.temperature : 0.8}"
+                                                       style="flex: 1;">
+                                                <span id="profile-${key}-temperature-value" style="font-size: 12px; color: #666; min-width: 25px;">${profile.temperature !== undefined ? profile.temperature : 0.8}</span>
+                                            </div>
+                                        </div>
+                                        <div style="margin-bottom: 6px;">
+                                            <label style="display: block; margin-bottom: 3px; font-size: 12px; color: #666;">最大Token:</label>
+                                            <input type="number" id="profile-${key}-max-tokens" min="1" max="80000"
+                                                   value="${profile.maxTokens || 300}"
+                                                   style="width: 100%; padding: 5px; border: 1px solid #ddd; border-radius: 3px; font-size: 13px; box-sizing: border-box;background-color: #fff;color: #000;">
+                                        </div>
+                                        <div style="margin-bottom: 6px;">
+                                            <label style="display: block; margin-bottom: 3px; font-size: 12px; color: #666;">系统提示词:</label>
+                                            <textarea id="profile-${key}-system-prompt" rows="2"
+                                                      placeholder="留空使用基础系统提示词..."
+                                                      style="width: 100%; padding: 5px; border: 1px solid #ddd; border-radius: 3px; font-size: 13px; resize: vertical; box-sizing: border-box;">${profile.systemPrompt || ''}</textarea>
+                                        </div>
+                                    </div>
+                                </details>
+                            `;
+                        }).join('')}
+                    </div>
+                </details>
+
+                <!-- 自动社交更新 -->
+                <details style="margin-bottom: 15px;">
+                    <summary style="cursor: pointer; font-weight: 500; margin-bottom: 10px;color: #000;">🔄 自动社交更新</summary>
+                    <div style="padding: 10px; background: #f8f9fa; border-radius: 8px;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                            <span style="font-size: 14px; color: #333;">启用自动更新</span>
+                            <label style="position: relative; display: inline-block; width: 50px; height: 26px; cursor: pointer;">
+                                <input type="checkbox" id="auto-social-toggle" style="opacity: 0; width: 0; height: 0;">
+                                <span style="
+                                    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+                                    background-color: #ccc; border-radius: 26px;
+                                    transition: 0.3s;
+                                "></span>
+                                <span id="auto-social-toggle-dot" style="
+                                    position: absolute; content: ''; height: 20px; width: 20px;
+                                    left: 3px; bottom: 3px; background-color: white;
+                                    border-radius: 50%; transition: 0.3s;
+                                "></span>
+                            </label>
+                        </div>
+                        <div id="auto-social-status" style="font-size: 13px; color: #666; margin-bottom: 10px;">状态：未启动</div>
+                        <div style="display: flex; gap: 8px;">
+                            <button type="button" id="auto-social-start" style="
+                                flex: 1; padding: 8px; background: #28a745; color: white;
+                                border: none; border-radius: 5px; cursor: pointer; font-size: 13px;
+                            ">▶ 启动</button>
+                            <button type="button" id="auto-social-stop" style="
+                                flex: 1; padding: 8px; background: #dc3545; color: white;
+                                border: none; border-radius: 5px; cursor: pointer; font-size: 13px;
+                            ">⏹ 停止</button>
+                            <button type="button" id="auto-social-trigger" style="
+                                flex: 1; padding: 8px; background: #ffc107; color: #333;
+                                border: none; border-radius: 5px; cursor: pointer; font-size: 13px;
+                            ">⚡ 立即更新</button>
+                        </div>
+                        <div style="margin-top: 10px; font-size: 12px; color: #999;">
+                            微博: 5分钟 | 朋友圈: 10分钟 | 论坛: 15分钟
+                        </div>
+                    </div>
+                </details>
+
                 <!-- 按钮组 -->
                 <div style="display: flex; gap: 10px; margin-top: 20px;">
                     <button type="button" id="test-api-connection" style="
@@ -467,6 +578,57 @@ class MobileCustomAPIConfig {
         // 保存配置
         $(document).on('click', '#save-api-config', () => {
             this.saveConfigFromUI();
+        });
+
+        // 自动社交更新 — 启动
+        $(document).on('click', '#auto-social-start', () => {
+            if (window.AutoSocialUpdater) {
+                window.AutoSocialUpdater.start();
+                this._updateAutoSocialUI(true);
+            } else {
+                alert('自动社交更新模块未加载');
+            }
+        });
+
+        // 自动社交更新 — 停止
+        $(document).on('click', '#auto-social-stop', () => {
+            if (window.AutoSocialUpdater) {
+                window.AutoSocialUpdater.stop();
+                this._updateAutoSocialUI(false);
+            }
+        });
+
+        // 自动社交更新 — 立即触发
+        $(document).on('click', '#auto-social-trigger', () => {
+            if (window.AutoSocialUpdater) {
+                window.AutoSocialUpdater.triggerUpdate('all').then(() => {
+                    var stats = window.AutoSocialUpdater.getStats();
+                    this._updateAutoSocialStatus(stats);
+                });
+            }
+        });
+
+        // 自动社交更新 — 开关切换
+        $(document).on('change', '#auto-social-toggle', (e) => {
+            var checked = e.target.checked;
+            if (window.AutoSocialUpdater) {
+                if (checked) {
+                    window.AutoSocialUpdater.start();
+                } else {
+                    window.AutoSocialUpdater.stop();
+                }
+                this._updateAutoSocialUI(checked);
+            }
+        });
+
+        // 场景预设温度滑块实时更新
+        Object.keys(MobileCustomAPIConfig.PROFILE_NAMES).forEach(key => {
+            $(document).on('input', `#profile-${key}-temperature`, (e) => {
+                const valueSpan = document.getElementById(`profile-${key}-temperature-value`);
+                if (valueSpan) {
+                    valueSpan.textContent = e.target.value;
+                }
+            });
         });
     }
 
@@ -612,6 +774,19 @@ class MobileCustomAPIConfig {
             if (element) {
                 if (element.type === 'checkbox') {
                     element.checked = value;
+                } else if (element.tagName === 'SELECT' && value) {
+                    // 检查值是否在已有选项中
+                    var hasOption = Array.from(element.options).some(function(opt) {
+                        return opt.value === value;
+                    });
+                    if (!hasOption) {
+                        // 模型列表未加载时，手动添加已保存的模型作为选项
+                        var opt = document.createElement('option');
+                        opt.value = value;
+                        opt.textContent = value;
+                        element.appendChild(opt);
+                    }
+                    element.value = value;
                 } else {
                     element.value = value;
                 }
@@ -639,16 +814,19 @@ class MobileCustomAPIConfig {
             } else {
                 // 其他服务商从输入框获取URL并保存
                 apiUrl = document.getElementById('api-url')?.value || '';
+                // 清理URL中的反引号和首尾空白
+                apiUrl = apiUrl.replace(/^[\s`'"]+|[\s`'"]+$/g, '');
                 this.saveNonGeminiUrl(provider, apiUrl);
             }
 
             // 收集UI数据
+            const newModel = document.getElementById('api-model')?.value || '';
             const formData = {
                 enabled: document.getElementById('api-enabled')?.checked || false,
                 provider: provider,
                 apiUrl: apiUrl,
                 apiKey: document.getElementById('api-key')?.value || '',
-                model: document.getElementById('api-model')?.value || '',
+                model: newModel || this.currentSettings.model || '',
                 temperature: parseFloat(document.getElementById('api-temperature')?.value || 0.8),
                 maxTokens: parseInt(document.getElementById('api-max-tokens')?.value || 1500),
                 systemPrompt: document.getElementById('api-system-prompt')?.value || ''
@@ -663,6 +841,28 @@ class MobileCustomAPIConfig {
 
             // 更新设置
             this.currentSettings = { ...this.currentSettings, ...formData };
+
+            // 收集场景预设数据
+            const profiles = {};
+            Object.keys(MobileCustomAPIConfig.PROFILE_NAMES).forEach(key => {
+                const modelEl = document.getElementById(`profile-${key}-model`);
+                const tempEl = document.getElementById(`profile-${key}-temperature`);
+                const maxTokensEl = document.getElementById(`profile-${key}-max-tokens`);
+                const systemPromptEl = document.getElementById(`profile-${key}-system-prompt`);
+
+                if (modelEl || tempEl || maxTokensEl || systemPromptEl) {
+                    profiles[key] = {
+                        model: modelEl ? modelEl.value : '',
+                        temperature: tempEl ? parseFloat(tempEl.value) : 0.8,
+                        maxTokens: maxTokensEl ? parseInt(maxTokensEl.value) : 300,
+                        systemPrompt: systemPromptEl ? systemPromptEl.value : ''
+                    };
+                }
+            });
+
+            if (Object.keys(profiles).length > 0) {
+                this.currentSettings.profiles = profiles;
+            }
 
             // 保存到localStorage
             const saved = await this.saveSettings();
@@ -1030,11 +1230,89 @@ class MobileCustomAPIConfig {
     }
 
     /**
+     * 获取指定场景的配置，与基础配置合并
+     * 场景中为空的字段会回退到基础配置
+     * @param {string} profileName - 场景名称 (chat/weibo/forum/live/friends/shop/task/backpack)
+     * @returns {Object} 合并后的配置
+     */
+    getProfileConfig(profileName) {
+        const defaults = this.getDefaultSettings();
+        const profiles = this.currentSettings.profiles || {};
+        const profile = profiles[profileName];
+
+        if (!profile) {
+            console.warn(`[Mobile API Config] 未找到场景预设: ${profileName}，使用基础配置`);
+            return {
+                model: this.currentSettings.model || defaults.model,
+                temperature: this.currentSettings.temperature,
+                maxTokens: this.currentSettings.maxTokens,
+                systemPrompt: this.currentSettings.systemPrompt || ''
+            };
+        }
+
+        return {
+            model: profile.model || this.currentSettings.model || defaults.model,
+            temperature: profile.temperature,
+            maxTokens: profile.maxTokens,
+            systemPrompt: profile.systemPrompt || this.currentSettings.systemPrompt || ''
+        };
+    }
+
+    /**
+     * 使用场景预设调用API
+     * 先获取场景配置，再调用 callAPI
+     * @param {Array} messages - 消息数组
+     * @param {string} profileName - 场景名称
+     * @param {Object} options - 额外选项（会覆盖场景预设）
+     * @returns {Object} API响应
+     */
+    async callAPIWithProfile(messages, profileName, options = {}) {
+        const profileConfig = this.getProfileConfig(profileName);
+
+        // 场景配置作为默认值，options中的字段可以覆盖
+        const mergedOptions = {
+            ...options,
+            temperature: options.temperature || profileConfig.temperature,
+            maxTokens: options.maxTokens || profileConfig.maxTokens,
+            model: options.model || profileConfig.model,
+            systemPrompt: options.systemPrompt || profileConfig.systemPrompt
+        };
+
+        console.log(`[Mobile API Config] 使用场景预设 [${profileName}] 调用API:`, {
+            model: mergedOptions.model,
+            temperature: mergedOptions.temperature,
+            maxTokens: mergedOptions.maxTokens,
+            hasSystemPrompt: !!mergedOptions.systemPrompt
+        });
+
+        return this.callAPI(messages, mergedOptions);
+    }
+
+    /**
      * 执行API调用（供其他模块使用）
+     * 如果 options 中有 profile 字段，自动应用场景预设
      */
     async callAPI(messages, options = {}) {
         if (!this.currentSettings.enabled) {
             throw new Error('自定义API未启用');
+        }
+
+        // 如果 options 中有 profile 字段，自动应用场景预设
+        if (options.profile) {
+            const profileConfig = this.getProfileConfig(options.profile);
+            const { profile, ...restOptions } = options;
+            options = {
+                ...restOptions,
+                temperature: restOptions.temperature !== undefined ? restOptions.temperature : (profileConfig.temperature !== undefined ? profileConfig.temperature : undefined),
+                maxTokens: restOptions.maxTokens !== undefined ? restOptions.maxTokens : (profileConfig.maxTokens !== undefined ? profileConfig.maxTokens : undefined),
+                model: restOptions.model || profileConfig.model || undefined,
+                systemPrompt: restOptions.systemPrompt || profileConfig.systemPrompt || undefined
+            };
+            console.log('[Mobile API Config] callAPI 自动应用场景预设 [' + (options.profile || profile) + ']:', {
+                model: options.model,
+                temperature: options.temperature,
+                maxTokens: options.maxTokens
+            });
         }
 
         const provider = this.currentSettings.provider;
@@ -1049,7 +1327,7 @@ class MobileCustomAPIConfig {
         }
 
         const apiKey = this.currentSettings.apiKey;
-        const model = this.currentSettings.model;
+        const model = options.model || this.currentSettings.model;
 
         if (!apiUrl || !model) {
             throw new Error('API配置不完整');
@@ -1114,6 +1392,9 @@ class MobileCustomAPIConfig {
      */
     buildRequestBody(provider, model, messages, options) {
         const settings = this.currentSettings;
+        // 优先使用 options 中通过场景预设传入的值
+        const effectiveModel = options.model || model;
+        const effectiveSystemPrompt = options.systemPrompt || settings.systemPrompt;
 
         if (provider === 'gemini') {
             // Gemini API格式
@@ -1147,9 +1428,9 @@ class MobileCustomAPIConfig {
             });
 
             // 添加系统提示词
-            if (settings.systemPrompt && contents.length === 0) {
+            if (effectiveSystemPrompt && contents.length === 0) {
                 contents.push({
-                    parts: [{ text: settings.systemPrompt }]
+                    parts: [{ text: effectiveSystemPrompt }]
                 });
             }
 
@@ -1164,7 +1445,7 @@ class MobileCustomAPIConfig {
         } else {
             // OpenAI兼容格式（用于OpenAI和自定义API）
             const body = {
-                model: model,
+                model: effectiveModel,
                 messages: messages,
                 max_tokens: options.maxTokens || settings.maxTokens,
                 temperature: options.temperature || settings.temperature,
@@ -1172,9 +1453,9 @@ class MobileCustomAPIConfig {
             };
 
             // 添加系统提示词
-            if (settings.systemPrompt) {
+            if (effectiveSystemPrompt) {
                 body.messages = [
-                    { role: 'system', content: settings.systemPrompt },
+                    { role: 'system', content: effectiveSystemPrompt },
                     ...body.messages
                 ];
             }
@@ -1330,6 +1611,41 @@ class MobileCustomAPIConfig {
             console.error('❌ 测试失败:', error);
             return null;
         }
+    }
+
+    /**
+     * 更新自动社交更新UI状态
+     */
+    _updateAutoSocialUI(isRunning) {
+        var toggle = document.getElementById('auto-social-toggle');
+        var dot = document.getElementById('auto-social-toggle-dot');
+        var track = toggle ? toggle.nextElementSibling : null;
+        if (toggle) toggle.checked = isRunning;
+        if (dot) {
+            dot.style.transform = isRunning ? 'translateX(24px)' : 'translateX(0)';
+        }
+        if (track) {
+            track.style.backgroundColor = isRunning ? '#28a745' : '#ccc';
+        }
+        var statusEl = document.getElementById('auto-social-status');
+        if (statusEl) {
+            statusEl.textContent = isRunning ? '状态：运行中 ✅' : '状态：已停止';
+            statusEl.style.color = isRunning ? '#28a745' : '#666';
+        }
+    }
+
+    /**
+     * 更新自动社交状态文本
+     */
+    _updateAutoSocialStatus(stats) {
+        var statusEl = document.getElementById('auto-social-status');
+        if (!statusEl || !stats) return;
+        var parts = [];
+        if (stats.weibo) parts.push('微博:' + stats.weibo);
+        if (stats.friends) parts.push('朋友圈:' + stats.friends);
+        if (stats.forum) parts.push('论坛:' + stats.forum);
+        statusEl.textContent = '上次更新 — ' + (parts.length > 0 ? parts.join(' | ') : '无');
+        statusEl.style.color = '#007bff';
     }
 }
 

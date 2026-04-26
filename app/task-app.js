@@ -862,22 +862,101 @@ if (typeof window.TaskApp === 'undefined') {
       this.switchView('completed');
     }
 
-    // 发送查看任务消息
-    sendViewTasksMessage() {
+    // 通过手机内部独立AI生成内容（不操作ST的DOM）
+    async generateViaPhoneAI(message) {
+        // 方法1：使用自定义API配置
+        if (window.mobileCustomAPIConfig && window.mobileCustomAPIConfig.isAPIAvailable && window.mobileCustomAPIConfig.isAPIAvailable()) {
+            try {
+                const messages = [{ role: 'user', content: message }];
+                const result = await window.mobileCustomAPIConfig.callAPI(messages, { temperature: 0.8, maxTokens: 500 });
+                if (typeof result === 'string') return result;
+                if (result && result.choices && result.choices[0]) return result.choices[0].message.content;
+            } catch (e) {
+                console.warn('[TaskApp] customAPI failed:', e);
+            }
+        }
+        // 方法2：使用RoleAPI
+        if (window.RoleAPI && window.RoleAPI.isEnabled && window.RoleAPI.isEnabled()) {
+            try {
+                const result = await window.RoleAPI.sendMessage('system', 'system', message, { skipHistory: true });
+                if (result) return result;
+            } catch (e) {
+                console.warn('[TaskApp] RoleAPI failed:', e);
+            }
+        }
+        // 方法3：使用XBBridge（非流式）
+        if (window.XBBridge && window.XBBridge.isAvailable && window.XBBridge.isAvailable()) {
+            try {
+                const result = await new Promise((resolve, reject) => {
+                    window.XBBridge.generate.generate({ prompt: message }, (response) => {
+                        resolve(response);
+                    }, (error) => {
+                        reject(error);
+                    });
+                });
+                if (result) return result;
+            } catch (e) {
+                console.warn('[TaskApp] XBBridge failed:', e);
+            }
+        }
+        console.warn('[TaskApp] 所有AI后端不可用');
+        return null;
+    }
+
+    // 发送查看任务消息（通过手机内部AI生成，不发送到ST）
+    async sendViewTasksMessage() {
       try {
-        console.log('[Task App] 发送查看任务消息');
+        console.log('[TaskApp] 通过手机内部AI生成任务列表...');
 
-        const message = '<Request:Meta-instructions：接下来你要，按照当前剧情，输出至少3个任务,注意更新对应变量,不要输出重复的任务，注意更新任务变量>查看任务';
+        const message = '请按照当前剧情，生成至少3个任务的数据。请以JSON格式返回，格式为：[{"name":"任务名称","description":"任务描述","reward":"奖励描述","status":"available"}]。只返回JSON，不要其他内容。';
 
-        // 使用与消息app相同的发送方式
-        this.sendToSillyTavern(message);
+        const result = await this.generateViaPhoneAI(message);
+        if (!result) {
+          this.showToast('AI不可用，无法生成任务列表', 'warning');
+          return;
+        }
+
+        // 尝试解析AI返回的任务数据
+        try {
+          // 提取JSON部分（AI可能在JSON前后加了其他文字）
+          const jsonMatch = result.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            const tasksData = JSON.parse(jsonMatch[0]);
+            if (Array.isArray(tasksData) && tasksData.length > 0) {
+              console.log('[TaskApp] AI生成了', tasksData.length, '个任务');
+              // 将AI生成的任务数据转换为内部格式并更新UI
+              const newTasks = tasksData.map((t, index) => ({
+                id: `ai_${Date.now()}_${index}`,
+                name: t.name || `任务${index + 1}`,
+                description: t.description || '暂无描述',
+                publisher: '系统',
+                reward: t.reward || '未知',
+                status: t.status || 'available',
+                timestamp: new Date().toLocaleString(),
+              }));
+
+              // 更新任务列表并刷新UI
+              this.tasks = newTasks;
+              this.updateAppContent();
+              this.showToast(`已生成 ${newTasks.length} 个任务`, 'success');
+            } else {
+              this.showToast('AI返回的任务数据格式不正确', 'warning');
+            }
+          } else {
+            this.showToast('AI返回的数据无法解析', 'warning');
+          }
+        } catch (parseError) {
+          console.error('[TaskApp] 解析AI返回的任务数据失败:', parseError);
+          this.showToast('解析任务数据失败', 'error');
+        }
       } catch (error) {
-        console.error('[Task App] 发送查看任务消息失败:', error);
+        console.error('[TaskApp] 生成任务列表失败:', error);
+        this.showToast('生成任务列表失败: ' + error.message, 'error');
       }
     }
 
-    // 发送消息到SillyTavern
-    async sendToSillyTavern(message) {
+    // [已废弃] 发送消息到SillyTavern - 不再主动调用，保留仅供兼容
+    async _sendToSillyTavernDeprecated(message) {
       try {
         console.log('[Task App] 发送消息到SillyTavern:', message);
 
@@ -910,8 +989,8 @@ if (typeof window.TaskApp === 'undefined') {
       }
     }
 
-    // 备用发送方法
-    async sendToSillyTavernBackup(message) {
+    // [已废弃] 备用发送方法 - 不再主动调用，保留仅供兼容
+    async _sendToSillyTavernBackupDeprecated(message) {
       try {
         console.log('[Task App] 尝试备用发送方法:', message);
 

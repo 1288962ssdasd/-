@@ -142,15 +142,24 @@
 .friend-avatar {
   width: 36px;
   height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  max-width: 36px;
+  max-height: 36px;
   border-radius: 50%;
   overflow: hidden;
   flex-shrink: 0;
 }
 
 .friend-avatar img {
-  width: 100%;
-  height: 100%;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  max-width: 36px;
+  max-height: 36px;
   object-fit: cover;
+  display: block;
 }
 
 .friend-info {
@@ -552,13 +561,13 @@
 }
 
 .tab-btn:hover {
-  background: #cebaab;
-  color: white;
+  background: #a89e95;
+  color: #4a3f3a;
 }
 
 .tab-btn.active {
   color: white;
-  background: #9291a3;
+  background: #7a7990;
 }
 
 .tab-btn i {
@@ -1073,21 +1082,28 @@
 /* 朋友圈真实图片样式 - 响应式设计 */
 .circle-image-container {
   width: 100%;
-  margin: 12px 0;
+  max-height: 200px;
+  margin: 8px 0;
   overflow: hidden;
-  border-radius: 12px;
+  border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
 }
 
 .circle-image {
   width: 100%;
   max-width: 100%;
+  max-height: 200px;
   height: auto;
-  border-radius: 12px;
-  cursor: pointer;
-  object-fit: contain;
+  border-radius: 8px;
+  object-fit: cover;
   transition: transform 0.3s ease;
   display: block;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 .circle-image:hover {

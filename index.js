@@ -118,18 +118,19 @@ async function initOptimizedLoading() {
         priority: 'low',
         required: false,
       },
-      {
-        src: './scripts/extensions/third-party/mobile/independent-ai.js',
-        name: 'independent-ai',
-        priority: 'medium',
-        required: false,
-      },
-      {
-        src: './scripts/extensions/third-party/mobile/phone-tts.js',
-        name: 'phone-tts',
-        priority: 'low',
-        required: false,
-      },
+      // 已由 phone-loader.js 加载，避免重复
+      // {
+      //   src: './scripts/extensions/third-party/mobile/independent-ai.js',
+      //   name: 'independent-ai',
+      //   priority: 'medium',
+      //   required: false,
+      // },
+      // {
+      //   src: './scripts/extensions/third-party/mobile/phone-tts.js',
+      //   name: 'phone-tts',
+      //   priority: 'low',
+      //   required: false,
+      // },
     ];
 
     // 优化：并行加载核心模块
@@ -420,6 +421,35 @@ phoneScript.onerror = () => {
   console.error('[Mobile Context] 手机界面脚本加载失败');
 };
 document.head.appendChild(phoneScript);
+
+// ==================== 加载 phone-loader.js（桥接模块统一加载器） ====================
+// phone-loader.js 负责加载 bridge-api、bridge-client、quest-engine 等核心桥接模块
+var phoneLoaderScript = document.createElement('script');
+phoneLoaderScript.src = './scripts/extensions/third-party/mobile/phone-loader.js' + '?v=' + Date.now();
+phoneLoaderScript.onload = function() {
+  console.log('[Mobile Context] phone-loader.js 加载完成');
+  // 调用 Phone.load() 启动模块加载
+  if (window.Phone && typeof window.Phone.load === 'function') {
+    window.Phone.load(function() {
+      console.log('[Mobile Context] ✅ 所有手机桥接模块加载完成');
+    });
+  } else {
+    console.warn('[Mobile Context] Phone.load 不可用，尝试延迟调用');
+    setTimeout(function() {
+      if (window.Phone && typeof window.Phone.load === 'function') {
+        window.Phone.load(function() {
+          console.log('[Mobile Context] ✅ 所有手机桥接模块加载完成（延迟）');
+        });
+      } else {
+        console.error('[Mobile Context] ❌ Phone.load 仍然不可用');
+      }
+    }, 2000);
+  }
+};
+phoneLoaderScript.onerror = function() {
+  console.error('[Mobile Context] phone-loader.js 加载失败');
+};
+document.head.appendChild(phoneLoaderScript);
 
 // 加载语音消息处理器脚本
 const voiceMessageScript = document.createElement('script');

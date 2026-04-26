@@ -40,7 +40,7 @@ class PhoneTTS {
                 defaultSpeed: catboxConfig.speechRate || this._ttsConfig.defaultSpeed,
                 defaultPitch: catboxConfig.pitch || this._ttsConfig.defaultPitch,
                 requestMode: catboxConfig.requestMode || 'direct',
-                bridgeServer: catboxConfig.bridgeServer || 'http://127.0.0.1:3001',
+                bridgeServer: catboxConfig.bridgeServer || 'http://127.0.0.1:3002',
                 globalHeaders: catboxConfig.globalHeaders || ''
             };
         }

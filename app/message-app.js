@@ -379,7 +379,7 @@ if (typeof window.MessageApp === 'undefined') {
 
         // 创建脚本标签
         const script = document.createElement('script');
-        script.src = 'scripts/extensions/third-party/mobile/app/real-time-sync.js';
+        script.src = '/scripts/extensions/third-party/mobile/app/real-time-sync.js';
         script.onload = () => {
           console.log('[Message App] ✅ 实时同步器脚本加载完成');
         };
@@ -1305,6 +1305,19 @@ if (typeof window.MessageApp === 'undefined') {
     // 触发自动渲染
     async triggerAutoRender() {
       try {
+        // 如果独立AI模式正在运行，跳过消息详情的重新渲染
+        // 避免覆盖独立AI生成的回复气泡
+        var isIndependentActive = window.RoleAPI && window.RoleAPI.isGenerating;
+        if (isIndependentActive) {
+          console.log('[Message App] ⏭️ 独立AI生成中，跳过自动渲染');
+          // 仍然更新好友列表
+          await this.updateFriendListRender();
+          if (this.currentView === 'list') {
+            this.refreshMessageList();
+          }
+          return;
+        }
+
         // 1. 更新好友列表渲染
         await this.updateFriendListRender();
 
@@ -3290,7 +3303,7 @@ if (typeof window.MessageApp === 'undefined') {
           for (const filename of files) {
             const fullPath = prefix + filename + suffix;
             // 🔥 修复：生成正确的备用路径
-            const fallbackPath = `/scripts/extensions/third-party/mobile/images/${filename}`;
+            const fallbackPath = '/scripts/extensions/third-party/mobile/images/' + filename;
 
             stickerImages.push({
               filename: filename,
@@ -3319,7 +3332,7 @@ if (typeof window.MessageApp === 'undefined') {
             for (const filename of files) {
               const fullPath = prefix + filename + suffix;
               // 🔥 修复：生成正确的备用路径
-              const fallbackPath = `/scripts/extensions/third-party/mobile/images/${filename}`;
+              const fallbackPath = '/scripts/extensions/third-party/mobile/images/' + filename;
 
               stickerImages.push({
                 filename: filename,
@@ -3965,7 +3978,7 @@ if (typeof window.MessageApp === 'undefined') {
               fallbackPath = stickerData.prefix + (stickerData.filename || stickerData) + stickerData.suffix;
             } else {
               // 最后才使用默认路径
-              fallbackPath = `/scripts/extensions/third-party/mobile/images/${stickerData.filename || stickerData}`;
+              fallbackPath = '/scripts/extensions/third-party/mobile/images/' + (stickerData.filename || stickerData);
             }
 
             return `
@@ -4448,7 +4461,7 @@ if (typeof window.MessageApp === 'undefined') {
 
       // 创建脚本标签
       const script = document.createElement('script');
-      script.src = 'scripts/extensions/third-party/mobile/app/attachment-sender.js';
+      script.src = '/scripts/extensions/third-party/mobile/app/attachment-sender.js';
       script.onload = () => {
         console.log('[Message App] ✅ 附件发送器脚本加载完成');
         // 不自动显示面板，只在用户点击时显示
@@ -4476,7 +4489,7 @@ if (typeof window.MessageApp === 'undefined') {
 
       // 创建脚本标签
       const script = document.createElement('script');
-      script.src = 'scripts/extensions/third-party/mobile/app/attachment-sender.js';
+      script.src = '/scripts/extensions/third-party/mobile/app/attachment-sender.js';
       script.onload = () => {
         console.log('[Message App] ✅ 附件发送器脚本静默加载完成');
       };
@@ -4873,6 +4886,16 @@ if (typeof window.MessageApp === 'undefined') {
           throw new Error('消息渲染器未加载');
         }
 
+        // 保存独立AI生成的气泡（避免重新渲染时丢失）
+        var messagesContainer = document.querySelector('.messages-container');
+        var independentBubbles = [];
+        if (messagesContainer) {
+          var indieEls = messagesContainer.querySelectorAll('.independent-stream, .message-detail.message-received[id]');
+          indieEls.forEach(function(el) {
+            independentBubbles.push(el.outerHTML);
+          });
+        }
+
         const content = await window.renderMessageDetailForFriend(this.currentFriendId, this.currentFriendName);
 
         const appContent = document.getElementById('app-content');
@@ -4930,6 +4953,17 @@ if (typeof window.MessageApp === 'undefined') {
 
           finalContent = tempDiv.innerHTML;
           appContent.innerHTML = finalContent;
+
+          // 恢复独立AI生成的气泡
+          if (independentBubbles.length > 0) {
+            var newContainer = document.querySelector('.messages-container');
+            if (newContainer) {
+              independentBubbles.forEach(function(html) {
+                newContainer.insertAdjacentHTML('beforeend', html);
+              });
+              console.log('[Message App] 恢复了', independentBubbles.length, '个独立AI气泡');
+            }
+          }
 
           if (window.DEBUG_MESSAGE_APP) {
             console.log('[Message App] 已设置新的发送区域结构');
@@ -5008,22 +5042,69 @@ if (typeof window.MessageApp === 'undefined') {
         return;
       }
 
-      // 无需检查重复，因为不再使用本地存储
-      // 上下文编辑器会处理重复消息
-
-      // 调用上下文编辑器添加到最新楼层
-      try {
-        await this.addToContext(name, number);
-        this.showMessage('好友添加成功，已编辑到最新楼层！', 'success');
-
-        // 延迟返回列表
-        setTimeout(() => {
-          this.showMessageList();
-        }, 1500);
-      } catch (error) {
-        console.error('[Message App] 添加到上下文失败:', error);
-        this.showMessage('好友添加成功，但编辑到上下文失败', 'warning');
+      // 方式1（优先）：通过小白X变量注册好友（不污染ST上下文）
+      if (window.BridgeAPI && window.BridgeAPI.ConfigManager) {
+        try {
+          // 读取现有好友列表
+          var existingList = await window.BridgeAPI.ConfigManager.get('xb.phone.friends.list');
+          var friends = [];
+          if (existingList) {
+            try { friends = JSON.parse(existingList); } catch(e) { friends = []; }
+          }
+          // 检查重复
+          var isDuplicate = friends.some(function(f) {
+            return String(f.number) === String(number) || f.name === name;
+          });
+          if (isDuplicate) {
+            this.showMessage('该好友已存在', 'warning');
+            return;
+          }
+          // 添加新好友
+          friends.push({ name: name, number: number, addTime: Date.now() });
+          await window.BridgeAPI.ConfigManager.set('xb.phone.friends.list', JSON.stringify(friends));
+          // 同时添加到 friendRenderer
+          if (window.friendRenderer && window.friendRenderer.addFriend) {
+            window.friendRenderer.addFriend(name, number);
+          }
+          this.showMessage('好友添加成功！（通过变量注册）', 'success');
+          setTimeout(() => { this.showMessageList(); }, 1000);
+          return;
+        } catch (e) {
+          console.warn('[Message App] 变量注册失败，回退到上下文编辑器:', e);
+        }
       }
+
+      // 方式2（回退）：通过小白X的STscript命令注册
+      if (window.STscript) {
+        try {
+          var existingList2 = await window.STscript('/getvar key=xb.phone.friends.list');
+          var friends2 = [];
+          if (existingList2 && existingList2.value) {
+            try { friends2 = JSON.parse(existingList2.value); } catch(e2) { friends2 = []; }
+          }
+          var isDup2 = friends2.some(function(f) {
+            return String(f.number) === String(number) || f.name === name;
+          });
+          if (isDup2) {
+            this.showMessage('该好友已存在', 'warning');
+            return;
+          }
+          friends2.push({ name: name, number: number, addTime: Date.now() });
+          await window.STscript('/setvar key=xb.phone.friends.list value=' + JSON.stringify(friends2));
+          if (window.friendRenderer && window.friendRenderer.addFriend) {
+            window.friendRenderer.addFriend(name, number);
+          }
+          this.showMessage('好友添加成功！（通过STscript注册）', 'success');
+          setTimeout(() => { this.showMessageList(); }, 1000);
+          return;
+        } catch (e2) {
+          console.warn('[Message App] STscript注册失败:', e2);
+        }
+      }
+
+      // 所有方式都失败
+      this.showMessage('好友添加失败：无法连接到变量系统', 'error');
+      console.error('[Message App] 所有好友注册方式都失败');
     }
 
     // 删除好友

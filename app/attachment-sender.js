@@ -376,8 +376,8 @@ if (typeof window !== 'undefined') {
 
     // 发送附件消息到SillyTavern聊天
     async sendAttachmentMessage(uploadResult, additionalMessages = '') {
-      console.log('[AttachmentSender] 🔍 开始发送附件消息');
-      console.log('[AttachmentSender] 🔍 当前聊天对象:', {
+      console.log('[AttachmentSender] 开始发送附件消息');
+      console.log('[AttachmentSender] 当前聊天对象:', {
         target: this.currentChatTarget,
         name: this.currentChatName,
         isGroup: this.isCurrentChatGroup,
@@ -391,7 +391,7 @@ if (typeof window !== 'undefined') {
         const category = this.getFileCategory({ type: uploadResult.fileType });
         const fileSize = this.formatFileSize(uploadResult.fileSize);
 
-        console.log('[AttachmentSender] 🔍 文件信息:', {
+        console.log('[AttachmentSender] 文件信息:', {
           category,
           fileSize,
           fileName: uploadResult.fileName,
@@ -413,7 +413,7 @@ if (typeof window !== 'undefined') {
 
         // 处理用户输入的附加消息
         if (additionalMessages && additionalMessages.trim()) {
-          console.log('[AttachmentSender] 🔍 处理附加消息:', additionalMessages);
+          console.log('[AttachmentSender] 处理附加消息:', additionalMessages);
           const messageLines = additionalMessages.split('\n').filter(line => line.trim());
 
           for (const line of messageLines) {
@@ -432,17 +432,37 @@ if (typeof window !== 'undefined') {
           messageContent += `[我方消息|${this.currentChatName}|${this.currentChatTarget}|附件|附件: ${uploadResult.fileName} (${fileSize})]`;
         }
 
-        console.log('[AttachmentSender] 🔍 构建的消息内容:', messageContent);
+        console.log('[AttachmentSender] 构建的消息内容:', messageContent);
 
-        // 发送消息到SillyTavern
+        // 独立AI模式：通过手机内部AI处理附件，不发送到ST
+        if (window.independentAI && window.independentAI.isEnabled && window.independentAI.isEnabled()) {
+          try {
+            console.log('[AttachmentSender] 使用独立AI模式发送附件');
+            const result = await window.independentAI.sendMessage(
+              this.currentChatName || 'unknown',
+              this.currentChatTarget || '0',
+              messageContent,
+              { attachment: uploadResult }
+            );
+            if (result) {
+              // 在手机UI中显示附件消息（不发送到ST）
+              this.displayAttachmentInPhone(result, uploadResult);
+              return true;
+            }
+          } catch (e) {
+            console.warn('[AttachmentSender] independentAI failed:', e);
+          }
+        }
+
+        // 回退：使用原有的ST发送逻辑
         const success = await this.sendToSillyTavern(messageContent, uploadResult);
 
         if (success) {
-          console.log(`[AttachmentSender] ✅ 附件消息发送成功`);
+          console.log(`[AttachmentSender] 附件消息发送成功`);
 
-          // 🌟 新增：等待SillyTavern处理消息，然后提取图片信息
+          // 等待SillyTavern处理消息，然后提取图片信息
           if (category === 'image') {
-            console.log(`[AttachmentSender] 🔍 等待SillyTavern处理图片消息...`);
+            console.log(`[AttachmentSender] 等待SillyTavern处理图片消息...`);
             setTimeout(async () => {
               await this.extractImageFromSillyTavern(uploadResult);
             }, 2000); // 等待2秒让SillyTavern处理消息
@@ -453,8 +473,120 @@ if (typeof window !== 'undefined') {
           throw new Error('发送消息到SillyTavern失败');
         }
       } catch (error) {
-        console.error(`[AttachmentSender] ❌ 发送附件消息失败:`, error);
+        console.error(`[AttachmentSender] 发送附件消息失败:`, error);
         return false;
+      }
+    }
+
+    // 在手机UI中显示附件消息（独立AI模式，不发送到ST）
+    displayAttachmentInPhone(result, uploadResult) {
+      try {
+        console.log('[AttachmentSender] 在手机UI中显示附件消息');
+
+        const category = this.getFileCategory({ type: uploadResult.fileType });
+        const fileSize = this.formatFileSize(uploadResult.fileSize);
+        const time = this.getCurrentTime();
+
+        // 构建用户发送的附件消息气泡
+        let attachmentHtml = '';
+
+        if (category === 'image') {
+          const imgSrc = uploadResult.fileUrl || uploadResult.isLocalFile
+            ? uploadResult.fileUrl
+            : '';
+          attachmentHtml = `
+            <div class="message-bubble user-bubble" style="margin-bottom: 12px; display: flex; flex-direction: column; align-items: flex-end;">
+              <div class="bubble-content" style="background: #95EC69; color: #000; padding: 8px 12px; border-radius: 8px; max-width: 70%; word-break: break-all;">
+                <div class="attachment-preview" style="margin-bottom: 4px;">
+                  <img src="${imgSrc}" alt="${uploadResult.fileName}" style="max-width: 200px; max-height: 200px; border-radius: 4px; cursor: pointer;" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                  <div style="display: none; color: #666; font-size: 12px;">[图片加载失败]</div>
+                </div>
+                <div class="attachment-info" style="font-size: 11px; color: #666; margin-top: 2px;">
+                  ${uploadResult.fileName} (${fileSize})
+                </div>
+              </div>
+              <div class="bubble-time" style="font-size: 10px; color: #999; margin-top: 2px;">${time}</div>
+            </div>
+          `;
+        } else {
+          // 非图片附件
+          const iconMap = {
+            document: '📄',
+            archive: '📦',
+            audio: '🎵',
+            video: '🎬',
+            unknown: '📎',
+          };
+          const icon = iconMap[category] || '📎';
+          attachmentHtml = `
+            <div class="message-bubble user-bubble" style="margin-bottom: 12px; display: flex; flex-direction: column; align-items: flex-end;">
+              <div class="bubble-content" style="background: #95EC69; color: #000; padding: 8px 12px; border-radius: 8px; max-width: 70%; word-break: break-all;">
+                <div class="attachment-file" style="display: flex; align-items: center; gap: 6px; margin-bottom: 2px;">
+                  <span style="font-size: 20px;">${icon}</span>
+                  <div>
+                    <div style="font-size: 13px; font-weight: 500;">${uploadResult.fileName}</div>
+                    <div style="font-size: 11px; color: #666;">${fileSize}</div>
+                  </div>
+                </div>
+              </div>
+              <div class="bubble-time" style="font-size: 10px; color: #999; margin-top: 2px;">${time}</div>
+            </div>
+          `;
+        }
+
+        // 将附件消息气泡插入到聊天区域
+        const container = document.querySelector('.messages-container');
+        if (container) {
+          container.insertAdjacentHTML('beforeend', attachmentHtml);
+          console.log('[AttachmentSender] 附件消息气泡已添加到聊天区域');
+
+          // 滚动到底部
+          if (window.independentAI && typeof window.independentAI.scrollToBottom === 'function') {
+            window.independentAI.scrollToBottom();
+          } else {
+            container.scrollTop = container.scrollHeight;
+          }
+        } else {
+          console.warn('[AttachmentSender] 未找到 .messages-container 容器');
+        }
+
+        // 如果AI有回复，也显示AI回复气泡
+        if (result && result.reply) {
+          this.displayAIReplyInPhone(result.reply);
+        }
+      } catch (error) {
+        console.error('[AttachmentSender] 显示附件消息失败:', error);
+      }
+    }
+
+    // 在手机UI中显示AI回复消息气泡
+    displayAIReplyInPhone(reply) {
+      try {
+        console.log('[AttachmentSender] 在手机UI中显示AI回复');
+
+        const time = this.getCurrentTime();
+        const replyHtml = `
+          <div class="message-bubble ai-bubble" style="margin-bottom: 12px; display: flex; flex-direction: column; align-items: flex-start;">
+            <div class="bubble-content" style="background: #fff; color: #000; padding: 8px 12px; border-radius: 8px; max-width: 70%; word-break: break-all; border: 1px solid #e5e5e5;">
+              <div class="reply-text" style="font-size: 14px; line-height: 1.5;">${reply}</div>
+            </div>
+            <div class="bubble-time" style="font-size: 10px; color: #999; margin-top: 2px;">${time}</div>
+          </div>
+        `;
+
+        const container = document.querySelector('.messages-container');
+        if (container) {
+          container.insertAdjacentHTML('beforeend', replyHtml);
+
+          // 滚动到底部
+          if (window.independentAI && typeof window.independentAI.scrollToBottom === 'function') {
+            window.independentAI.scrollToBottom();
+          } else {
+            container.scrollTop = container.scrollHeight;
+          }
+        }
+      } catch (error) {
+        console.error('[AttachmentSender] 显示AI回复失败:', error);
       }
     }
 

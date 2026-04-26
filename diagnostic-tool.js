@@ -250,7 +250,7 @@ class MobileDiagnosticTool {
     async reloadMissingModules() {
         console.log('🔄 重新加载缺失的模块...');
 
-        const basePath = './scripts/extensions/third-party/mobile/';
+        const basePath = window.MOBILE_BASE_PATH + '';
         const modules = [
             { file: 'performance-config.js', check: () => !!window.MOBILE_PERFORMANCE_CONFIG },
             { file: 'optimized-loader.js', check: () => !!window.OptimizedLoader },

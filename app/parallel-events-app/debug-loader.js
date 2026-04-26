@@ -8,9 +8,9 @@ console.log('  - 用户代理:', navigator.userAgent);
 
 // 检查文件路径
 const expectedPaths = [
-    './scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-app.css',
-    './scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-styles.js',
-    './scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-app.js'
+    '/scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-app.css',
+    '/scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-styles.js',
+    '/scripts/extensions/third-party/mobile/app/parallel-events-app/parallel-events-app.js'
 ];
 
 console.log('📁 [Debug Loader] 预期文件路径:');

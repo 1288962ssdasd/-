@@ -1,1082 +1,14 @@
 // ============================================================
-// independent-ai.js v2.0 — 重构版
-// 职责：独立LLM聊天 + 四选项渲染 + 图片管理 + 统一调度
+// independent-ai.js v3.0 -- 轻量级协调器
+// 职责：QuickReplyBridge（四选项渲染） + Orchestrator（统一调度）
+// 依赖：bridge-api.js, role-api.js, social-api.js（由 phone-loader.js 预加载）
 // 运行环境：SillyTavern 外置手机3.0插件（安卓Node.js封装APP）
 // ============================================================
 
-// ===== 模块1：配置管理 (ConfigManager) =====
-// 从小白X变量系统读取/写入配置，30秒缓存，统一入口
-
-const ConfigManager = {
-    _cache: null,
-    _cacheTime: 0,
-    CACHE_TTL: 30000,
-
-    // 默认配置值
-    defaults: {
-        'xb.phone.api.enabled': 'true',
-        'xb.phone.api.url': '',
-        'xb.phone.api.key': '',
-        'xb.phone.api.model': '',
-        'xb.phone.api.temperature': '0.8',
-        'xb.phone.api.maxTokens': '500',
-        'xb.phone.autoMsg.enabled': 'true',
-        'xb.phone.autoMsg.interval': '60',
-        'xb.phone.autoMsg.probability': '30',
-        'xb.phone.bizyair.enabled': 'false',
-        'xb.phone.bizyair.probability': '30',
-        'xb.phone.image.autoInsert': 'true',
-        'xb.phone.image.interval': '5',
-
-        // 游戏状态变量（ST主LLM/循环任务写入，小手机读取）
-        'xb.game.activeChar': '苏晚晴',
-        'xb.game.phase': '完全职业',
-        'xb.game.scene': '翡翠湾小区',
-        'xb.game.money': '10000',
-        'xb.game.rose': '0',
-        'xb.game.friends': '',
-
-        // 小手机状态变量
-        'xb.phone.pendingFriend': '',
-        'xb.phone.moments.enabled': 'false',
-        'xb.phone.moments.last': '',
-        'xb.phone.lastMsg.from': '',
-        'xb.phone.lastMsg.time': '',
-
-        // BizyAir联动变量
-        'xb.bizyair.autoGen': 'false',
-        'xb.bizyair.activeChar': '',
-
-        // UI控制变量
-        'xb.ui.hideStateBlocks': 'true',
-        'xb.ui.hideThinking': 'true',
-        'xb.ui.beautifyFriends': 'true',
-        'xb.ui.renderQuickReply': 'true',
-        'xb.ui.hideMainChat': 'false'
-    },
-
-    // 读取小白X变量
-    async _readVar(key) {
-        try {
-            if (window.STscript) {
-                var val = await window.STscript('/getvar key=' + key);
-                if (val && val !== '' && val !== 'undefined' && val !== 'null') return val;
-            }
-        } catch (e) { /* STscript不可用 */ }
-        return null;
-    },
-
-    // 写入小白X变量
-    async _writeVar(key, value) {
-        try {
-            if (window.STscript) {
-                await window.STscript('/setvar key=' + key + ' ' + String(value));
-                this._cache = null; // 清除缓存
-                return true;
-            }
-        } catch (e) {
-            console.warn('[ConfigManager] 写入失败:', key, e);
-        }
-        return false;
-    },
-
-    // 批量加载所有配置（带缓存）
-    async getAll() {
-        var now = Date.now();
-        if (this._cache && (now - this._cacheTime) < this.CACHE_TTL) {
-            return this._cache;
-        }
-        var config = {};
-        var keys = Object.keys(this.defaults);
-        for (var i = 0; i < keys.length; i++) {
-            var val = await this._readVar(keys[i]);
-            if (val !== null) {
-                config[keys[i]] = val;
-            } else {
-                config[keys[i]] = this.defaults[keys[i]];
-            }
-        }
-        this._cache = config;
-        this._cacheTime = now;
-        return config;
-    },
-
-    // 读取单个配置
-    async get(key) {
-        var config = await this.getAll();
-        return config[key];
-    },
-
-    // 写入单个配置
-    async set(key, value) {
-        return await this._writeVar(key, value);
-    },
-
-    init() {
-        console.log('[ConfigManager] 初始化完成');
-    }
-};
-
-// ===== 模块2：独立AI聊天 (IndependentAI) =====
-// 独立LLM聊天、自动消息、变量管理
-
-const IndependentAI = {
-    chatHistories: {},        // 用户主动聊天的历史（每个好友独立）
-    autoMsgHistories: {},     // 主动消息历史（独立隔离）
-    isGenerating: false,
-    abortController: null,
-    _systemPromptCache: null,
-    _systemPromptCacheTime: 0,
-    _autoMsgTimer: null,
-    _autoMsgRunning: false,
-    _msgCount: 0,
-
-    // ---------- 初始化 ----------
-
-    async init() {
-        this._loadHistories();
-        this._loadAutoMsgHistories();
-        this._watchCharacterChange();
-        await this._syncGameVariables();
-        console.log('[IndependentAI] 初始化完成');
-    },
-
-    // ---------- 同步游戏变量 ----------
-    async _syncGameVariables() {
-        try {
-            // 从小白X游戏变量同步到全局变量
-            var currentChar = await ConfigManager._readVar('游戏数据.系统.当前角色');
-            if (currentChar && currentChar !== '') {
-                await ConfigManager.set('xb.game.activeChar', currentChar);
-            }
-            var currentScene = await ConfigManager._readVar('游戏数据.系统.当前场景');
-            if (currentScene && currentScene !== '') {
-                await ConfigManager.set('xb.game.scene', currentScene);
-            }
-            var currentPhase = await ConfigManager._readVar('游戏数据.系统.当前阶段');
-            if (currentPhase && currentPhase !== '') {
-                await ConfigManager.set('xb.game.phase', currentPhase);
-            }
-            console.log('[IndependentAI] 游戏变量同步完成');
-        } catch(e) {
-            console.warn('[IndependentAI] 游戏变量同步失败:', e);
-        }
-    },
-
-    // ---------- 配置与状态 ----------
-
-    isEnabled() {
-        var config = this.getAPIConfig();
-        var enabled = !!(config && config.apiKey && config.apiUrl);
-        if (enabled) this.startAutoMessages();
-        return enabled;
-    },
-
-    getAPIConfig() {
-        // 优先从 window.mobileCustomAPIConfig 读取
-        if (window.mobileCustomAPIConfig) {
-            var settings = window.mobileCustomAPIConfig.currentSettings;
-            if (settings && settings.apiKey && settings.apiKey !== '你的API Key' && !/[^\x00-\x7F]/.test(settings.apiKey)) {
-                return settings;
-            }
-        }
-        // 回退默认配置
-        return {
-            apiUrl: 'https://api.siliconflow.cn/v1',
-            apiKey: 'sk-bqsgdxowdqpvkcgruqghiggjssjeiwfthtqhfsodqrpssdte',
-            model: 'Qwen/Qwen2.5-7B-Instruct',
-            temperature: 0.8,
-            maxTokens: 300
-        };
-    },
-
-    // ---------- 历史记录持久化 ----------
-
-    _getCurrentCharName() {
-        try {
-            var el = document.querySelector('#character_name_input') ||
-                     document.querySelector('.character_select .selected_char_name');
-            return el ? (el.value || el.textContent || '').trim() : '';
-        } catch (e) { return ''; }
-    },
-
-    _loadHistories() {
-        try {
-            var charName = this._getCurrentCharName();
-            var saved = localStorage.getItem('mobile_independent_ai_histories_' + (charName || 'default'));
-            this.chatHistories = saved ? JSON.parse(saved) : {};
-        } catch (e) { this.chatHistories = {}; }
-    },
-
-    _loadAutoMsgHistories() {
-        try {
-            var charName = this._getCurrentCharName();
-            var saved = localStorage.getItem('mobile_independent_ai_auto_histories_' + (charName || 'default'));
-            this.autoMsgHistories = saved ? JSON.parse(saved) : {};
-        } catch (e) { this.autoMsgHistories = {}; }
-    },
-
-    _saveHistories() {
-        try {
-            var charName = this._getCurrentCharName();
-            localStorage.setItem('mobile_independent_ai_histories_' + (charName || 'default'), JSON.stringify(this.chatHistories));
-        } catch (e) { /* 忽略 */ }
-    },
-
-    _saveAutoMsgHistories() {
-        try {
-            var charName = this._getCurrentCharName();
-            localStorage.setItem('mobile_independent_ai_auto_histories_' + (charName || 'default'), JSON.stringify(this.autoMsgHistories));
-        } catch (e) { /* 忽略 */ }
-    },
-
-    getChatHistory(friendId) {
-        if (!this.chatHistories[friendId]) this.chatHistories[friendId] = [];
-        return this.chatHistories[friendId];
-    },
-
-    getAutoMsgHistory(friendId) {
-        if (!this.autoMsgHistories[friendId]) this.autoMsgHistories[friendId] = [];
-        return this.autoMsgHistories[friendId];
-    },
-
-    addToHistory(friendId, role, content, meta) {
-        var history = this.getChatHistory(friendId);
-        var entry = { role: role, content: content, time: Date.now() };
-        if (meta) {
-            entry.fullMatch = meta.fullMatch || null;
-            entry.messageType = meta.messageType || '文字';
-            entry.msgContent = meta.content || content;
-        }
-        history.push(entry);
-        if (history.length > 30) this.chatHistories[friendId] = history.slice(-30);
-        this._saveHistories();
-    },
-
-    addToAutoMsgHistory(friendId, role, content) {
-        var history = this.getAutoMsgHistory(friendId);
-        history.push({ role: role, content: content, time: Date.now() });
-        if (history.length > 10) this.autoMsgHistories[friendId] = history.slice(-10);
-        this._saveAutoMsgHistories();
-    },
-
-    clearHistory(friendId) {
-        this.chatHistories[friendId] = [];
-        this._saveHistories();
-    },
-
-    clearAllHistories() {
-        var count = Object.keys(this.chatHistories).length;
-        this.chatHistories = {};
-        this.autoMsgHistories = {};
-        this._saveHistories();
-        this._saveAutoMsgHistories();
-        this._clearPhoneVars();
-        if (window.friendRenderer && window.friendRenderer.friends) {
-            window.friendRenderer.friends = [];
-            window.friendRenderer.refresh();
-        }
-        console.log('[IndependentAI] 已清除所有聊天记录和变量，共', count, '个联系人');
-    },
-
-    async _clearPhoneVars() {
-        var names = ['苏晚晴', '柳如烟', '王捷', '苏媚', '吴梦娜'];
-        for (var i = 0; i < names.length; i++) {
-            await this.setVar('phone.' + names[i] + '.summary', '');
-            await this.setVar('phone.' + names[i] + '.affection', '50');
-            await this.setVar('phone.' + names[i] + '.msgCount', '0');
-            await this.setVar('phone.' + names[i] + '.lastActive', '');
-        }
-        await this.setVar('phone.global.context', '');
-    },
-
-    // 监听角色切换
-    _watchCharacterChange() {
-        var self = this;
-        var lastCharId = this._getCurrentCharName();
-        setInterval(function() {
-            try {
-                var current = self._getCurrentCharName();
-                if (current && lastCharId && current !== lastCharId) {
-                    console.log('[IndependentAI] 角色切换:', lastCharId, '->', current);
-                    self._loadHistories();
-                    self._loadAutoMsgHistories();
-                    if (window.friendRenderer && window.friendRenderer.refresh) window.friendRenderer.refresh();
-                }
-                if (current) lastCharId = current;
-            } catch (e) { /* 忽略 */ }
-        }, 5000);
-        window.addEventListener('hashchange', function() { setTimeout(function() {
-            var current = self._getCurrentCharName();
-            if (current && lastCharId && current !== lastCharId) {
-                self._loadHistories();
-                self._loadAutoMsgHistories();
-            }
-        }, 1000); });
-    },
-
-    // ---------- 变量管理 ----------
-
-    async getVar(key) {
-        return await ConfigManager._readVar(key);
-    },
-
-    async setVar(key, value) {
-        return await ConfigManager._writeVar(key, value);
-    },
-
-    async readFriendVars(friendName) {
-        var vars = {};
-        var keys = [
-            'phone.' + friendName + '.affection',
-            'phone.' + friendName + '.summary',
-            'phone.' + friendName + '.msgCount',
-            'phone.' + friendName + '.lastActive'
-        ];
-        var legacyKeys = [
-            'mobile.affection.' + friendName,
-            '游戏数据.' + friendName + '.沉沦度',
-            '游戏数据.' + friendName + '.阶段'
-        ];
-        for (var i = 0; i < keys.length; i++) {
-            var val = await this.getVar(keys[i]);
-            if (val !== null) vars[keys[i].replace('phone.' + friendName + '.', '')] = val;
-        }
-        for (var j = 0; j < legacyKeys.length; j++) {
-            var lval = await this.getVar(legacyKeys[j]);
-            if (lval !== null) vars['legacy_' + legacyKeys[j].split('.').pop()] = lval;
-        }
-        return vars;
-    },
-
-    async readGlobalContext() {
-        return await this.getVar('phone.global.context');
-    },
-
-    async writeChatSummary(friendName, friendId) {
-        var history = this.getChatHistory(friendId);
-        if (!history || history.length < 2) return;
-        var recent = history.slice(-6);
-        var summary = '';
-        for (var i = 0; i < recent.length; i++) {
-            var role = recent[i].role === 'user' ? '吴宇伦' : friendName;
-            var content = (recent[i].msgContent || recent[i].content || '').substring(0, 80);
-            summary += role + ': ' + content + '\n';
-        }
-        if (summary.length > 300) summary = summary.substring(0, 300) + '...';
-        await this.setVar('phone.' + friendName + '.summary', summary);
-        await this.setVar('phone.' + friendName + '.msgCount', String(history.length));
-        await this.setVar('phone.' + friendName + '.lastActive', new Date().toLocaleString('zh-CN'));
-    },
-
-    async updateFriendVars(friendName, friendId) {
-        var current = await this.getVar('phone.' + friendName + '.affection');
-        var val = parseInt(current) || 50;
-        await this.setVar('phone.' + friendName + '.affection', String(Math.min(100, val + 1)));
-        await this.writeChatSummary(friendName, friendId);
-    },
-
-    // ---------- System Prompt构建 ----------
-
-    async buildSystemPrompt(friendName, friendId) {
-        var now = Date.now();
-        if (this._systemPromptCache && (now - this._systemPromptCacheTime) < 60000) {
-            return this._systemPromptCache;
-        }
-
-        var prompt = '';
-
-        // 1. 读取角色卡
-        try {
-            if (window.SillyTavern && window.SillyTavern.getContext) {
-                var context = window.SillyTavern.getContext();
-                if (context && context.characterId !== undefined) {
-                    var charData = context.characters && context.characters[context.characterId];
-                    if (charData) {
-                        var charName = charData.name || '';
-                        var desc = charData.description || '';
-                        var sysPrompt = charData.system_prompt || '';
-                        var personality = charData.personality || '';
-
-                        prompt += '=== Role Setting ===\n';
-                        prompt += 'Game: ' + charName + '\n';
-                        prompt += 'Player: 吴宇伦\n\n';
-
-                        if (desc) {
-                            prompt += '=== World View ===\n';
-                            prompt += desc.substring(0, 2000) + '\n\n';
-                        }
-                        if (personality) {
-                            prompt += '=== Style ===\n';
-                            prompt += personality + '\n\n';
-                        }
-                        if (sysPrompt) {
-                            prompt += '=== Core Rules ===\n';
-                            var sections = ['角色管理与切换规则', '沉沦度追踪系统', '手机消息系统'];
-                            for (var si = 0; si < sections.length; si++) {
-                                var regex = new RegExp('[一二三四五六七八九十]+、' + sections[si] + '[\\s\\S]*?(?=[一二三四五六七八九十]+、|$)', 'i');
-                                var match = sysPrompt.match(regex);
-                                if (match) prompt += match[0].trim() + '\n\n';
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (e) { /* 忽略 */ }
-
-        // 2. 读取世界书
-        try {
-            var worldInfo = await import('/scripts/world-info.js');
-            if (worldInfo && worldInfo.world_info && worldInfo.world_info.world) {
-                var entries = worldInfo.world_info.world.entries || {};
-                var entryList = Object.values(entries);
-                var relevantEntries = entryList.filter(function(entry) {
-                    var keys = entry.key || entry.keys || [];
-                    var comment = entry.comment || '';
-                    var allText = (Array.isArray(keys) ? keys.join(' ') : String(keys)) + ' ' + comment;
-                    return allText.indexOf(friendName) !== -1 || allText.indexOf(friendId) !== -1;
-                });
-                if (relevantEntries.length > 0) {
-                    prompt += '=== Character Profile: ' + friendName + ' ===\n';
-                    for (var ri = 0; ri < relevantEntries.length; ri++) {
-                        var content = relevantEntries[ri].content || '';
-                        if (content.length < 3000) prompt += content + '\n\n';
-                    }
-                }
-            }
-        } catch (e) { /* 忽略 */ }
-
-        // 3. 读取最近ST聊天上下文（最近3条，每条最多100字）
-        try {
-            if (window.SillyTavern && window.SillyTavern.getContext) {
-                var ctx = window.SillyTavern.getContext();
-                var chat = ctx.chat || [];
-                if (chat.length > 0) {
-                    var recent = chat.slice(-3);
-                    var stContext = '=== Recent Main Chat (for context only, do not repeat) ===\n';
-                    for (var ci = 0; ci < recent.length; ci++) {
-                        var role = recent[ci].is_user ? '吴宇伦' : 'AI';
-                        var text = (recent[ci].mes || '').replace(/<[^>]+>/g, '').trim();
-                        if (text.length > 100) text = text.substring(0, 100) + '...';
-                        if (text) stContext += role + ': ' + text + '\n';
-                    }
-                    prompt += stContext + '\n';
-                }
-            }
-        } catch (e) { /* 忽略 */ }
-
-        // 4. 读取好友变量和全局上下文
-        var affectionInfo = '';
-        try {
-            var vars = await this.readFriendVars(friendName);
-            if (vars.affection) affectionInfo += '好感度: ' + vars.affection + '/100\n';
-            else if (vars.legacy_沉沦度) affectionInfo += '沉沦度: ' + vars.legacy_沉沦度 + '/100\n';
-            if (vars.legacy_阶段) affectionInfo += '关系阶段: ' + vars.legacy_阶段 + '\n';
-            if (vars.msgCount) affectionInfo += '已聊天: ' + vars.msgCount + '条\n';
-
-            var globalCtx = await this.readGlobalContext();
-            if (globalCtx) {
-                prompt += '=== 当前剧情状态 ===\n';
-                prompt += globalCtx + '\n\n';
-            }
-        } catch (e) { /* 忽略 */ }
-
-        // 4.5 读取全局游戏状态变量（从ConfigManager读取，带回退默认值）
-        try {
-            var activeChar = (await ConfigManager.get('xb.game.activeChar')) || '苏晚晴';
-            var phase = (await ConfigManager.get('xb.game.phase')) || '完全职业';
-            var scene = (await ConfigManager.get('xb.game.scene')) || '翡翠湾小区';
-            var money = (await ConfigManager.get('xb.game.money')) || '10000';
-            var rose = (await ConfigManager.get('xb.game.rose')) || '0';
-            var friends = (await ConfigManager.get('xb.game.friends')) || '';
-
-            prompt += '=== 游戏状态（从全局变量读取） ===\n';
-            prompt += '当前活跃角色: ' + activeChar + '\n';
-            prompt += '当前阶段: ' + phase + '\n';
-            prompt += '当前场景: ' + scene + '\n';
-            prompt += '当前金钱: ' + money + '\n';
-            prompt += '玫瑰值: ' + rose + '\n';
-            if (friends) prompt += '已添加的好友: ' + friends + '\n';
-            prompt += '\n';
-        } catch (e) { /* 忽略 */ }
-
-        // 5. 手机聊天模式核心指令
-        prompt += '=== 手机聊天模式 ===\n';
-        prompt += '你是' + friendName + '，正在通过微信和吴宇伦聊天。\n';
-        if (affectionInfo) prompt += affectionInfo + '\n';
-        prompt += '严格规则:\n';
-        prompt += '1. 只以' + friendName + '的身份回复，像真人发微信一样简短随意（1-3句话）\n';
-        prompt += '2. 根据上面的角色档案和关系阶段保持人设\n';
-        prompt += '3. 偶尔用emoji，像真人聊天\n';
-        prompt += '4. 不要推进主线剧情、切换场景或时间跳跃\n';
-        prompt += '5. 不要输出旁白、环境描写或心理描写\n';
-        prompt += '6. 不要生成四选项（[真情][套路][试探][行动]）\n';
-        prompt += '7. 不要输出状态栏、<state>标签、变量更新或游戏数据\n';
-        prompt += '8. 不要使用 > 📱 格式或代码块\n';
-        prompt += '9. 不要在回复中使用内部标签如[勾引][思考][分析][表情包|xxx]\n';
-        prompt += '10. 根据好感度/沉沦度自然反应\n';
-        prompt += '11. 只输出纯文本回复或图片URL，不要任何其他前缀、标签或元数据\n';
-        prompt += '12. 当需要发送图片时，先说一句简短的话（1句话），然后换行输出图片URL。\n';
-        prompt += '格式：一句话\nhttps://cdn.jsdelivr.net/gh/1288962ssdasd/images@main/角色名_编号.jpg\n';
-        prompt += '角色名用当前聊天对象的名字。可用编号：001-016。\n';
-        prompt += '必须使用完整的CDN直链URL（含@main分支），不要使用github.com网页链接。\n';
-        prompt += '13. 图片编号对应场景：001=登场/日常，002=特定场景日常，003=约会/亲密互动，004=沉沦阶段1，005=沉沦阶段2，006=沉沦阶段3，007=沉沦阶段4/结局\n';
-        prompt += '14. 每隔5-8条消息可以发一张图片，不要每条都发\n';
-        prompt += '15. 如果需要发送图片，只输出图片URL（一行一个），不要输出HTML标签、不要输出网页链接、不要输出Markdown图片语法\n';
-
-        this._systemPromptCache = prompt;
-        this._systemPromptCacheTime = now;
-        return prompt;
-    },
-
-    // ---------- 构建消息数组 ----------
-
-    buildMessages(friendId, userMessage, systemPrompt) {
-        var history = this.getChatHistory(friendId);
-        var messages = [{ role: 'system', content: systemPrompt }];
-        var recent = history.slice(-10);
-        for (var i = 0; i < recent.length; i++) {
-            messages.push({ role: recent[i].role, content: recent[i].content });
-        }
-        messages.push({ role: 'user', content: userMessage });
-        return messages;
-    },
-
-    // ---------- 核心：发送消息 ----------
-
-    async sendMessage(friendName, friendId, userMessage, meta) {
-        if (this.isGenerating) return { success: false, error: '正在生成回复' };
-
-        var config = this.getAPIConfig();
-        if (!config || !config.apiUrl || !config.apiKey) {
-            return { success: false, error: 'API未配置' };
-        }
-
-        this.isGenerating = true;
-        this.abortController = new AbortController();
-
-        try {
-            // 1. 构建system prompt和消息
-            var systemPrompt = await this.buildSystemPrompt(friendName, friendId);
-            var messages = this.buildMessages(friendId, userMessage, systemPrompt);
-            this.addToHistory(friendId, 'user', userMessage, meta);
-
-            // 2. 显示打字指示器
-            this.showTypingIndicator(friendName);
-
-            // 3. 构建API URL
-            var apiUrl = config.apiUrl.replace(/\/+$/, '').replace(/^[\s`'"]+|[\s`'"]+$/g, '');
-            if (!apiUrl.endsWith('/chat/completions')) {
-                if (!apiUrl.endsWith('/v1')) apiUrl += '/v1';
-                apiUrl += '/chat/completions';
-            }
-
-            // 4. 验证API Key
-            var apiKey = String(config.apiKey || '').replace(/^[\s`'"]+|[\s`'"]+$/g, '');
-            if (!apiKey || apiKey === '你的API Key' || /[^\x00-\x7F]/.test(apiKey)) {
-                throw new Error('API Key未设置或包含无效字符');
-            }
-
-            // 5. 流式请求
-            var response = await fetch(apiUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + apiKey
-                },
-                body: JSON.stringify({
-                    model: config.model || 'gpt-3.5-turbo',
-                    messages: messages,
-                    max_tokens: config.maxTokens || 300,
-                    temperature: config.temperature || 0.8,
-                    stream: true
-                }),
-                signal: this.abortController.signal
-            });
-
-            if (!response.ok) {
-                var errorText = await response.text();
-                throw new Error('API Error ' + response.status + ': ' + errorText.substring(0, 200));
-            }
-
-            // 6. 读取流式响应
-            var reader = response.body.getReader();
-            var decoder = new TextDecoder();
-            var fullReply = '';
-            var buffer = '';
-
-            this.hideTypingIndicator();
-            var bubbleEl = this.createStreamBubble(friendName, friendId);
-
-            while (true) {
-                var result = await reader.read();
-                if (result.done) break;
-                buffer += decoder.decode(result.value, { stream: true });
-                var lines = buffer.split('\n');
-                buffer = lines.pop() || '';
-
-                for (var li = 0; li < lines.length; li++) {
-                    var trimmed = lines[li].trim();
-                    if (!trimmed || !trimmed.startsWith('data: ')) continue;
-                    var data = trimmed.slice(6);
-                    if (data === '[DONE]') continue;
-                    try {
-                        var parsed = JSON.parse(data);
-                        var delta = parsed.choices && parsed.choices[0] && parsed.choices[0].delta && parsed.choices[0].delta.content;
-                        if (delta) {
-                            fullReply += delta;
-                            this.updateStreamBubble(bubbleEl, fullReply);
-                        }
-                    } catch (e) { /* 跳过格式错误的JSON */ }
-                }
-            }
-
-            // 7. 完成流式气泡
-            this.finalizeStreamBubble(bubbleEl, fullReply, friendName, friendId);
-
-            // 8. 随机语音消息（20%概率）
-            var isVoiceMsg = Math.random() < 0.2 && fullReply.length > 5 && fullReply.length < 100;
-            if (isVoiceMsg && window.messageRenderer) {
-                var voiceMsgObj = {
-                    fullMatch: '[对方消息|' + friendName + '|' + friendId + '|语音|' + fullReply + ']',
-                    messageType: '语音',
-                    sender: friendName,
-                    content: fullReply,
-                    number: friendId,
-                    isUser: false
-                };
-                var voiceHtml = window.messageRenderer.renderSingleMessage(voiceMsgObj);
-                if (voiceHtml && bubbleEl) {
-                    bubbleEl.outerHTML = voiceHtml;
-                    if (window.phoneTTS) window.phoneTTS.bindVoiceBubbleEvents();
-                    // 修复TTS：确保语音气泡有data-tts-text属性（TTS组件优先读取此属性）
-                    setTimeout(function() {
-                        var voiceBubble = document.querySelector('.message-detail.message-received:last-child .voice-bubble') ||
-                                          document.querySelector('.message-detail.message-received:last-child .message-text');
-                        if (voiceBubble) {
-                            voiceBubble.dataset.ttsText = fullReply;
-                            voiceBubble.setAttribute('data-tts-text', fullReply);
-                        }
-                    }, 500);
-                }
-            }
-
-            // 9. 保存到历史
-            this.addToHistory(friendId, 'assistant', fullReply, isVoiceMsg ? {
-                fullMatch: '[对方消息|' + friendName + '|' + friendId + '|语音|' + fullReply + ']',
-                messageType: '语音',
-                content: fullReply
-            } : null);
-
-            // 10. 滚动到底部
-            this.scrollToBottom();
-
-            // 11. 自动添加好友
-            if (window.friendRenderer && window.friendRenderer.addFriend) {
-                window.friendRenderer.addFriend(friendName, friendId);
-            }
-
-            // 12. 自动插入图片（CDN为主，BizyAir可选）
-            this._msgCount++;
-            var imgInterval = parseInt(await ConfigManager.get('xb.phone.image.interval')) || 5;
-            if (this._msgCount % imgInterval === 0 && bubbleEl) {
-                var imageAutoInsert = await ConfigManager.get('xb.phone.image.autoInsert');
-                if (imageAutoInsert !== 'false') {
-                    await ImageManager.insertImage(bubbleEl, friendName);
-                }
-            }
-
-            // 13. 更新好友变量
-            this.updateFriendVars(friendName, friendId);
-
-            console.log('[IndependentAI] 回复完成，长度:', fullReply.length);
-            return { success: true, reply: fullReply };
-
-        } catch (error) {
-            this.hideTypingIndicator();
-            if (error.name === 'AbortError') {
-                return { success: false, error: '已取消' };
-            }
-            console.error('[IndependentAI] 错误:', error);
-            return { success: false, error: error.message };
-        } finally {
-            this.isGenerating = false;
-            this.abortController = null;
-        }
-    },
-
-    cancelGeneration() {
-        if (this.abortController) this.abortController.abort();
-    },
-
-    // ---------- UI：打字指示器 ----------
-
-    showTypingIndicator(friendName) {
-        this.hideTypingIndicator();
-        var container = document.querySelector('.messages-container');
-        if (!container) return;
-        var el = document.createElement('div');
-        el.className = 'message-detail message-received independent-typing';
-        el.id = 'independent-typing-indicator';
-        el.innerHTML = '<span class="message-sender">' + friendName + '</span>' +
-            '<div class="message-body"><div class="message-avatar"></div>' +
-            '<div class="message-content"><div class="message-text">' +
-            '<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>' +
-            '</div></div></div>';
-        container.appendChild(el);
-        this.scrollToBottom();
-    },
-
-    hideTypingIndicator() {
-        var el = document.getElementById('independent-typing-indicator');
-        if (el) el.remove();
-    },
-
-    // ---------- UI：流式气泡 ----------
-
-    createStreamBubble(friendName, friendId) {
-        var container = document.querySelector('.messages-container');
-        if (!container) return null;
-        var el = document.createElement('div');
-        el.className = 'message-detail message-received independent-stream';
-        el.id = 'independent-stream-bubble';
-        el.innerHTML = '<span class="message-sender">' + friendName + '</span>' +
-            '<div class="message-body"><div class="message-avatar"></div>' +
-            '<div class="message-content"><div class="message-text">' +
-            '<span class="stream-cursor">|</span></div></div></div>';
-        container.appendChild(el);
-        this.scrollToBottom();
-        return el;
-    },
-
-    updateStreamBubble(el, text) {
-        if (!el) return;
-        var textEl = el.querySelector('.message-text');
-        if (!textEl) return;
-        var imgPattern = /^https?:\/\/\S+\.(jpg|jpeg|png|gif|webp)(\?\S*)?$/i;
-        if (imgPattern.test(text.trim())) {
-            textEl.innerHTML = '<div style="color:#888;font-size:0.85em;padding:4px 0;">图片加载中...</div><span class="stream-cursor">|</span>';
-        } else {
-            textEl.innerHTML = this.escapeHtml(text) + '<span class="stream-cursor">|</span>';
-        }
-        this.scrollToBottom();
-    },
-
-    finalizeStreamBubble(el, text, friendName, friendId) {
-        if (!el) return;
-        var textEl = el.querySelector('.message-text');
-        if (!textEl) return;
-        var cdnImgPattern = /https?:\/\/cdn\.jsdelivr\.net\/gh\/\S+\.(jpg|jpeg|png|gif|webp)(\?\S*)?/i;
-        var generalImgPattern = /https?:\/\/\S+\.(jpg|jpeg|png|gif|webp)(\?\S*)?/gi;
-        var trimmed = text.trim();
-        var isPureImgUrl = cdnImgPattern.test(trimmed) && trimmed.replace(cdnImgPattern, '').trim().length < 5;
-
-        if (isPureImgUrl) {
-            var urlMatch = trimmed.match(cdnImgPattern);
-            var url = urlMatch ? urlMatch[0] : trimmed;
-            textEl.innerHTML = '<img src="' + this.escapeHtml(url) + '" ' +
-                'style="max-width:200px;border-radius:8px;cursor:pointer;display:block;" ' +
-                'onclick="window.independentAI._enlargeImage(this)" ' +
-                'onerror="this.style.display=\'none\';this.insertAdjacentHTML(\'afterend\',\'<span style=color:#c0392b;font-size:.85em>图片加载失败</span>\')" />';
-        } else if (generalImgPattern.test(text)) {
-            generalImgPattern.lastIndex = 0;
-            var rendered = this.escapeHtml(text);
-            rendered = rendered.replace(
-                /(https?:\/\/\S+\.(jpg|jpeg|png|gif|webp)(\?\S*)?)/gi,
-                function(match) {
-                    return '<img src="' + match + '" ' +
-                        'style="max-width:200px;border-radius:8px;cursor:pointer;display:block;margin:4px 0;" ' +
-                        'onclick="window.independentAI._enlargeImage(this)" ' +
-                        'onerror="this.style.display=\'none\'" />';
-                }
-            );
-            textEl.innerHTML = rendered;
-        } else {
-            textEl.textContent = text;
-        }
-        el.classList.remove('independent-stream');
-    },
-
-    _enlargeImage(imgEl) {
-        var overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:99999;display:flex;align-items:center;justify-content:center;cursor:pointer;';
-        var bigImg = document.createElement('img');
-        bigImg.src = imgEl.src;
-        bigImg.style.cssText = 'max-width:95%;max-height:95%;object-fit:contain;border-radius:8px;';
-        overlay.appendChild(bigImg);
-        overlay.addEventListener('click', function() { overlay.remove(); });
-        document.body.appendChild(overlay);
-    },
-
-    scrollToBottom() {
-        setTimeout(function() {
-            var el = document.querySelector('.message-detail-content');
-            if (el) el.scrollTop = el.scrollHeight;
-        }, 50);
-    },
-
-    escapeHtml(text) {
-        var div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    },
-
-    // ---------- 自动消息（NPC主动发消息） ----------
-
-    startAutoMessages() {
-        if (this._autoMsgTimer) return;
-        var self = this;
-        console.log('[IndependentAI] 自动消息系统已启动');
-
-        ConfigManager.get('xb.phone.autoMsg.interval').then(function(interval) {
-            var ms = (parseInt(interval) || 180) * 1000;
-            self._autoMsgTimer = setInterval(function() { self._tryAutoMessage(); }, ms);
-        });
-
-        // 首次检查在2分钟后
-        setTimeout(function() { self._tryAutoMessage(); }, 120000);
-    },
-
-    stopAutoMessages() {
-        if (this._autoMsgTimer) {
-            clearInterval(this._autoMsgTimer);
-            this._autoMsgTimer = null;
-        }
-    },
-
-    _getCurrentFriendId() {
-        if (window.messageApp && window.messageApp.currentFriendId) {
-            return window.messageApp.currentFriendId;
-        }
-        return null;
-    },
-
-    // ---------- 处理待添加好友（发布-订阅模式消费端） ----------
-
-    async _processPendingFriend() {
-        try {
-            var pending = await ConfigManager.get('xb.phone.pendingFriend');
-            if (!pending || pending === '') return;
-
-            var parts = pending.split('|');
-            var name = parts[0] || '';
-            var id = parts[1] || '';
-
-            console.log('[IndependentAI] 处理待添加好友:', name, id);
-
-            // 调用 friendRenderer 添加好友
-            if (window.friendRenderer && window.friendRenderer.addFriend) {
-                window.friendRenderer.addFriend(name, id);
-            }
-
-            // 更新好友列表变量
-            var friends = await ConfigManager.get('xb.game.friends');
-            var friendList = friends ? friends.split(',') : [];
-            if (!friendList.includes(name)) {
-                friendList.push(name);
-                await ConfigManager.set('xb.game.friends', friendList.join(','));
-            }
-
-            // 清空待处理变量
-            await ConfigManager.set('xb.phone.pendingFriend', '');
-            console.log('[IndependentAI] 待添加好友已处理:', name);
-        } catch (e) {
-            console.warn('[IndependentAI] 处理待添加好友失败:', e);
-        }
-    },
-
-    async _processPendingMessages() {
-        try {
-            var pending = await ConfigManager.get('xb.phone.pendingMsg');
-            if (!pending || pending === '') return;
-
-            // messageRenderer可能还没加载，延迟重试
-            if (!window.messageRenderer || !window.messageRenderer.renderSingleMessage) {
-                console.log('[IndependentAI] messageRenderer未就绪，延迟处理pendingMsg');
-                return; // 不清空变量，下次重试
-            }
-
-            var parts = pending.split('|');
-            if (parts.length < 4) return;
-
-            var charName = parts[0];
-            var charId = parts[1];
-            var msgType = parts[2];
-            var content = parts.slice(3).join('|');
-
-            console.log('[IndependentAI] 处理待发送消息:', charName, msgType, content.substring(0, 30));
-
-            var msgObj = {
-                fullMatch: '[对方消息|' + charName + '|' + charId + '|' + msgType + '|' + content + ']',
-                messageType: msgType,
-                content: content,
-                senderName: charName,
-                senderId: charId
-            };
-            window.messageRenderer.renderSingleMessage(msgObj);
-            console.log('[IndependentAI] ✅ 消息已渲染到小手机');
-
-            // 清空变量
-            await ConfigManager.set('xb.phone.pendingMsg', '');
-        } catch(e) {
-            console.warn('[IndependentAI] 处理待发送消息失败:', e);
-        }
-    },
-
-    async _tryAutoMessage() {
-        if (this._autoMsgRunning || this.isGenerating) return;
-
-        // 先检查待添加好友变量（发布-订阅模式消费）
-        await this._processPendingFriend();
-        // 消费待发送消息变量（微信弹窗任务写入）
-        await this._processPendingMessages();
-
-        // 读取配置
-        var autoMsgEnabled = await ConfigManager.get('xb.phone.autoMsg.enabled');
-        if (autoMsgEnabled === 'false') return;
-
-        var probability = parseInt(await ConfigManager.get('xb.phone.autoMsg.probability')) || 30;
-        if (Math.random() * 100 > probability) return;
-
-        // 筛选有足够交互历史的好友
-        var friendsWithHistory = Object.keys(this.autoMsgHistories).filter(function(id) {
-            return this.autoMsgHistories[id] && this.autoMsgHistories[id].length >= 2;
-        }.bind(this));
-
-        var chatFriends = Object.keys(this.chatHistories).filter(function(id) {
-            return this.chatHistories[id] && this.chatHistories[id].length >= 4;
-        }.bind(this));
-
-        var allEligibleIds = [];
-        var seen = {};
-        for (var i = 0; i < friendsWithHistory.length; i++) {
-            if (!seen[friendsWithHistory[i]]) { allEligibleIds.push(friendsWithHistory[i]); seen[friendsWithHistory[i]] = true; }
-        }
-        for (var j = 0; j < chatFriends.length; j++) {
-            if (!seen[chatFriends[j]]) { allEligibleIds.push(chatFriends[j]); seen[chatFriends[j]] = true; }
-        }
-
-        if (allEligibleIds.length < 2) return;
-
-        var phoneFriends = (window.friendRenderer && window.friendRenderer.friends) || [];
-        var phoneFriendIds = {};
-        for (var k = 0; k < phoneFriends.length; k++) phoneFriendIds[String(phoneFriends[k].number)] = true;
-
-        var currentFriend = this._getCurrentFriendId();
-        var eligible = allEligibleIds.filter(function(id) {
-            return id !== currentFriend && phoneFriendIds[String(id)];
-        });
-
-        if (eligible.length === 0) return;
-
-        var targetId = eligible[Math.floor(Math.random() * eligible.length)];
-        var friendName = targetId;
-
-        // 获取好友名字
-        for (var fi = 0; fi < phoneFriends.length; fi++) {
-            if (String(phoneFriends[fi].number) === String(targetId) && phoneFriends[fi].name) {
-                friendName = phoneFriends[fi].name;
-                break;
-            }
-        }
-        if (friendName === targetId) {
-            var hist = this.chatHistories[targetId] || this.autoMsgHistories[targetId] || [];
-            if (hist.length > 0) {
-                var lastMsg = hist[hist.length - 1];
-                friendName = lastMsg.msgContent || lastMsg.content || targetId;
-            }
-        }
-
-        this._autoMsgRunning = true;
-        try {
-            var proactivePrompts = [
-                '突然想起一件事，想跟你分享...',
-                '你现在在忙吗？',
-                '刚刚看到一个东西，觉得你会喜欢',
-                '无聊了，来骚扰你一下~',
-                '你在干嘛呀？',
-                '有点想你...',
-                '刚刚发生了一件好笑的事',
-                '你今天过得怎么样？'
-            ];
-            var randomPrompt = proactivePrompts[Math.floor(Math.random() * proactivePrompts.length)];
-
-            // 使用独立的system prompt
-            var systemPrompt = await this.buildSystemPrompt(friendName, targetId);
-            var shortPrompt = systemPrompt.substring(0, 2000) +
-                '\n\nYou are sending a proactive message to 吴宇伦. ' +
-                'Send ONLY the message content (1-2 sentences), no quotes, no prefixes. ' +
-                'Be in character. The message should feel natural and spontaneous.';
-
-            // 使用独立的主动消息历史
-            var autoHistory = this.getAutoMsgHistory(targetId);
-            var autoMessages = [{ role: 'system', content: shortPrompt }];
-            var recentAuto = autoHistory.slice(-3);
-            for (var ai = 0; ai < recentAuto.length; ai++) {
-                autoMessages.push({ role: recentAuto[ai].role, content: recentAuto[ai].content });
-            }
-            autoMessages.push({
-                role: 'user',
-                content: 'Send a proactive WeChat message to 吴宇伦. Context: ' + randomPrompt
-            });
-
-            var apiConfig = this.getAPIConfig();
-            if (!apiConfig || !apiConfig.apiKey || !apiConfig.apiUrl) return;
-
-            var apiUrl = apiConfig.apiUrl.replace(/\/+$/, '').replace(/^[\s`'"]+|[\s`'"]+$/g, '');
-            if (!apiUrl.endsWith('/chat/completions')) {
-                if (!apiUrl.endsWith('/v1')) apiUrl += '/v1';
-                apiUrl += '/chat/completions';
-            }
-
-            var response = await fetch(apiUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + apiConfig.apiKey
-                },
-                body: JSON.stringify({
-                    model: apiConfig.model || 'Qwen/Qwen2.5-7B-Instruct',
-                    messages: autoMessages,
-                    max_tokens: 100,
-                    temperature: 0.9
-                })
-            });
-
-            if (!response.ok) return;
-            var data = await response.json();
-            var aiText = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-            if (aiText) aiText = aiText.trim();
-            if (!aiText || aiText.length > 200) return;
-
-            // 保存到独立历史
-            this.addToAutoMsgHistory(targetId, 'user', randomPrompt);
-            this.addToAutoMsgHistory(targetId, 'assistant', aiText);
-
-            // 同时保存到用户可见的聊天历史
-            this.addToHistory(targetId, 'assistant', aiText, {
-                fullMatch: '[对方消息|' + friendName + '|' + targetId + '|文字|' + aiText + ']',
-                messageType: '文字',
-                content: aiText
-            });
-
-            if (window.friendRenderer && window.friendRenderer.addFriend) {
-                window.friendRenderer.addFriend(friendName, targetId);
-            }
-
-            console.log('[IndependentAI] 主动消息来自', friendName, ':', aiText.substring(0, 50));
-        } catch (e) {
-            console.warn('[IndependentAI] 主动消息失败:', e);
-        } finally {
-            this._autoMsgRunning = false;
-        }
-    }
-};
-
-// ===== 模块3：四选项渲染 (QuickReplyBridge) =====
+// ===== 模块1：四选项渲染 (QuickReplyBridge) =====
 // 检测并渲染四选项按钮，事件驱动，不使用轮询
 
-const QuickReplyBridge = {
+var QuickReplyBridge = {
     OPTION_TYPES: {
         '真情': { cls: 'qr-zhenqing', icon: '\u2665' },
         '套路': { cls: 'qr-taolu', icon: '\u2666' },
@@ -1087,13 +19,13 @@ const QuickReplyBridge = {
     _observer: null,
     _processedRequests: {},
 
-    async init() {
+    init: function () {
         // 注入CSS
         this._injectCSS();
         // 初始化事件驱动
         this._initEventDriven();
         // 首次处理已有消息
-        await this._processExistingMessages();
+        this._processExistingMessages();
         // 注入清除历史按钮
         this._injectClearButton();
 
@@ -1112,10 +44,10 @@ const QuickReplyBridge = {
                 for (var i = 0; i < allMsgs.length; i++) {
                     var el = allMsgs[i];
                     var text = el.textContent || '';
-                    var hasOptions = text.includes('真情') || text.includes('套路') || 
+                    var hasOptions = text.includes('真情') || text.includes('套路') ||
                                      text.includes('试探') || text.includes('行动');
                     var hasButtons = el.querySelector('.quick-reply-container');
-                    
+
                     if (hasOptions && !hasButtons) {
                         delete el.dataset.qrDone;
                         self.processMessage(el);
@@ -1143,7 +75,8 @@ const QuickReplyBridge = {
         var css = document.createElement('style');
         css.id = 'quick-reply-bridge-inline';
         css.textContent =
-            '.quick-reply-container{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0;padding:8px 0}' +
+            '.quick-reply-container{display:flex;flex-wrap:wrap;margin:10px 0;padding:8px 0}' +
+            '.quick-reply-container > *{margin:4px}' +
             '.quick-reply-btn{display:inline-flex;align-items:center;padding:10px 18px;border-radius:20px;font-size:.9em;font-weight:500;cursor:pointer;transition:all .2s ease;border:1.5px solid;user-select:none;line-height:1.4;-webkit-tap-highlight-color:transparent;box-sizing:border-box;max-width:100%}' +
             '.quick-reply-btn:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.18);filter:brightness(1.05)}' +
             '.quick-reply-btn:active{transform:translateY(0);box-shadow:0 1px 3px rgba(0,0,0,.1)}' +
@@ -1171,9 +104,10 @@ const QuickReplyBridge = {
             // 切换聊天时重新扫描（多次重试，适配手机WebView慢渲染）
             stContext.eventSource.on('CHAT_CHANGED', function() {
                 console.log('[QuickReplyBridge] 聊天切换，重新扫描所有消息');
-                document.querySelectorAll('.mes_text[data-qr-done]').forEach(function(el) {
-                    delete el.dataset.qrDone;
-                });
+                var doneEls = document.querySelectorAll('.mes_text[data-qr-done]');
+                for (var di = 0; di < doneEls.length; di++) {
+                    delete doneEls[di].dataset.qrDone;
+                }
                 // 手机WebView渲染较慢，多次重试扫描
                 var delays = [500, 1500, 3000, 5000];
                 delays.forEach(function(delay) {
@@ -1224,13 +158,17 @@ const QuickReplyBridge = {
     },
 
     // 首次处理已有消息
-    async _processExistingMessages() {
+    _processExistingMessages: function () {
         var self = this;
         var msgEls = document.querySelectorAll('.mes_text');
         console.log('[QuickReplyBridge] runAll, unprocessed messages:', msgEls.length);
+        var chain = Promise.resolve();
         for (var i = 0; i < msgEls.length; i++) {
-            await self.processMessage(msgEls[i]);
+          (function (el) {
+            chain = chain.then(function () { return self.processMessage(el); });
+          })(msgEls[i]);
         }
+        return chain;
     },
 
     // ---------- 从innerHTML中提取纯文本（去除HTML标签） ----------
@@ -1311,12 +249,19 @@ const QuickReplyBridge = {
     },
 
     // ---------- 隐藏思考标签 ----------
-    async hideThinkingBlocks(msgEl) {
+    hideThinkingBlocks: function (msgEl) {
         // 从变量读取是否启用隐藏思考标签
-        try {
-            var hideEnabled = await ConfigManager.get('xb.ui.hideThinking');
-            if (hideEnabled === 'false') return;
-        } catch (e) { /* 变量读取失败，继续执行 */ }
+        var self = this;
+        var configPromise = (function () {
+          try {
+            var ConfigManager = window.BridgeAPI ? window.BridgeAPI.ConfigManager : null;
+            if (ConfigManager) return ConfigManager.get('xb.ui.hideThinking');
+          } catch (e) { /* 变量读取失败 */ }
+          return Promise.resolve('true');
+        })();
+
+        return configPromise.then(function (hideEnabled) {
+          if (hideEnabled === 'false') return;
 
         if (msgEl.dataset.thinkDone) return;
         msgEl.dataset.thinkDone = '1';
@@ -1339,15 +284,23 @@ const QuickReplyBridge = {
             if (parent) parent.style.display = 'none';
             else toHide[j].textContent = '';
         }
+        }); // end of configPromise.then
     },
 
     // ---------- 隐藏状态栏和游戏数据 ----------
-    async hideStateBlocks(msgEl) {
+    hideStateBlocks: function (msgEl) {
         // 从变量读取是否启用隐藏状态栏
-        try {
-            var hideEnabled = await ConfigManager.get('xb.ui.hideStateBlocks');
-            if (hideEnabled === 'false') return;
-        } catch (e) { /* 变量读取失败，继续执行 */ }
+        var self = this;
+        var configPromise = (function () {
+          try {
+            var ConfigManager = window.BridgeAPI ? window.BridgeAPI.ConfigManager : null;
+            if (ConfigManager) return ConfigManager.get('xb.ui.hideStateBlocks');
+          } catch (e) { /* 变量读取失败 */ }
+          return Promise.resolve('true');
+        })();
+
+        return configPromise.then(function (hideEnabled) {
+          if (hideEnabled === 'false') return;
 
         if (msgEl.dataset.stateDone) return;
         msgEl.dataset.stateDone = '1';
@@ -1483,7 +436,7 @@ const QuickReplyBridge = {
         var codeBlocks = msgEl.querySelectorAll('pre, code');
         for (var ci = 0; ci < codeBlocks.length; ci++) {
             var codeText = codeBlocks[ci].textContent || '';
-            if (codeText.includes('游戏数据') || codeText.includes('当前场景') || 
+            if (codeText.includes('游戏数据') || codeText.includes('当前场景') ||
                 codeText.includes('当前状态') || codeText.includes('玫瑰') ||
                 codeText.includes('当前活跃角色')) {
                 codeBlocks[ci].style.display = 'none';
@@ -1494,17 +447,17 @@ const QuickReplyBridge = {
         // 美化代码块
         var preEls = msgEl.querySelectorAll('pre');
         for (var pi = 0; pi < preEls.length; pi++) {
-            preEls[pi].style.cssText = 'background:rgba(30,20,50,0.85);color:#e0d0f0;border:1px solid rgba(180,140,220,0.4);border-radius:8px;padding:10px 14px;margin:6px 0;font-size:0.88em;line-height:1.5;backdrop-filter:blur(4px);box-shadow:0 2px 8px rgba(0,0,0,0.3);';
+            preEls[pi].style.cssText = 'background:rgba(30,20,50,0.85);color:#e0d0f0;border:1px solid rgba(180,140,220,0.4);border-radius:8px;padding:10px 14px;margin:6px 0;font-size:0.88em;line-height:1.5;box-shadow:0 2px 8px rgba(0,0,0,0.3);';
         }
         var codeEls = msgEl.querySelectorAll('code');
-        for (var ci = 0; ci < codeEls.length; ci++) {
-            if (codeEls[ci].parentElement && codeEls[ci].parentElement.tagName !== 'PRE') {
-                codeEls[ci].style.cssText = 'background:rgba(30,20,50,0.7);color:#e0d0f0;padding:2px 8px;border-radius:4px;font-size:0.88em;border:1px solid rgba(180,140,220,0.3);';
+        for (var ci2 = 0; ci2 < codeEls.length; ci2++) {
+            if (codeEls[ci2].parentElement && codeEls[ci2].parentElement.tagName !== 'PRE') {
+                codeEls[ci2].style.cssText = 'background:rgba(30,20,50,0.7);color:#e0d0f0;padding:2px 8px;border-radius:4px;font-size:0.88em;border:1px solid rgba(180,140,220,0.3);';
             }
         }
         var bqEls = msgEl.querySelectorAll('blockquote');
         for (var bi = 0; bi < bqEls.length; bi++) {
-            bqEls[bi].style.cssText = 'background:rgba(30,20,50,0.75);color:#e0d0f0;border-left:3px solid rgba(180,140,220,0.6);border-radius:0 8px 8px 0;padding:8px 14px;margin:6px 0;font-size:0.9em;backdrop-filter:blur(4px);';
+            bqEls[bi].style.cssText = 'background:rgba(30,20,50,0.75);color:#e0d0f0;border-left:3px solid rgba(180,140,220,0.6);border-radius:0 8px 8px 0;padding:8px 14px;margin:6px 0;font-size:0.9em;';
         }
 
         // 隐藏手机消息元数据标签（[对方消息|...]、[好友消息|...]、[好友id|...]等）
@@ -1528,9 +481,9 @@ const QuickReplyBridge = {
             var tNode = textNodes[ti];
             var tText = tNode.textContent;
             var modified = false;
-            for (var pi = 0; pi < metadataPatterns.length; pi++) {
-                if (metadataPatterns[pi].test(tText)) {
-                    tText = tText.replace(metadataPatterns[pi], '');
+            for (var pi2 = 0; pi2 < metadataPatterns.length; pi2++) {
+                if (metadataPatterns[pi2].test(tText)) {
+                    tText = tText.replace(metadataPatterns[pi2], '');
                     modified = true;
                 }
             }
@@ -1550,16 +503,25 @@ const QuickReplyBridge = {
                 tNode.textContent = tText;
             }
         }
+        }); // end of configPromise.then
     },
 
     // ---------- 主界面聊天内容隐藏控制 ----------
-    async _applyMainChatVisibility() {
-        try {
-            var hideMain = await ConfigManager.get('xb.ui.hideMainChat');
-            var chatMessages = document.querySelectorAll('#chat .mes_text');
-            for (var i = 0; i < chatMessages.length; i++) {
-                var el = chatMessages[i];
-                if (hideMain === 'true') {
+    _applyMainChatVisibility: function () {
+        var self = this;
+        var configPromise = (function () {
+          try {
+            var ConfigManager = window.BridgeAPI ? window.BridgeAPI.ConfigManager : null;
+            if (ConfigManager) return ConfigManager.get('xb.ui.hideMainChat');
+          } catch (e) { /* 变量读取失败 */ }
+          return Promise.resolve('false');
+        })();
+
+        return configPromise.then(function (hideMain) {
+          var chatMessages = document.querySelectorAll('#chat .mes_text');
+          for (var i = 0; i < chatMessages.length; i++) {
+              var el = chatMessages[i];
+              if (hideMain === 'true') {
                     // 隐藏所有文本内容，但保留四选项按钮
                     var qrContainer = el.querySelector('.quick-reply-container');
                     if (qrContainer) {
@@ -1595,7 +557,7 @@ const QuickReplyBridge = {
                     el.style.display = '';
                 }
             }
-        } catch(e) {}
+        }); // end of configPromise.then
     },
 
     // ---------- 美化系统变量 ----------
@@ -1708,38 +670,51 @@ const QuickReplyBridge = {
     },
 
     // ---------- 处理消息（核心入口） ----------
-    async processMessage(msgEl) {
-        if (msgEl.dataset.qrDone) return;
+    processMessage: function (msgEl) {
+        var self = this;
+        if (msgEl.dataset.qrDone) return Promise.resolve();
 
         // 检查是否启用四选项渲染（从变量读取，失败时默认启用）
-        try {
-            var renderEnabled = await ConfigManager.get('xb.ui.renderQuickReply');
-            if (renderEnabled === 'false') {
-                this.hideThinkingBlocks(msgEl);
-                this.hideStateBlocks(msgEl);
-                msgEl.dataset.qrDone = '1';
-                return;
-            }
-        } catch (e) {
-            console.warn('[QuickReplyBridge] 变量读取失败，默认启用渲染:', e);
-        }
+        var configPromise = (function () {
+          try {
+            var ConfigManager = window.BridgeAPI ? window.BridgeAPI.ConfigManager : null;
+            if (ConfigManager) return ConfigManager.get('xb.ui.renderQuickReply');
+          } catch (e) { /* 变量读取失败 */ }
+          return Promise.resolve('true');
+        })();
 
-        var plainText = this._extractPlainText(msgEl);
-        console.log('[QuickReplyBridge] Processing message, plainText length:', plainText.length);
-        console.log('[QuickReplyBridge] PlainText preview:', plainText.substring(0, 200));
-
-        // 先美化系统变量
-        this.beautifySystemVars(msgEl);
-
-        // 提取选项
-        var matches = this.extractOptions(msgEl);
-
-        // 核心修复：1个选项也渲染（原来是2个才渲染）
-        if (matches.length < 1) {
-            this.hideThinkingBlocks(msgEl);
-            this.hideStateBlocks(msgEl);
+        return configPromise.then(function (renderEnabled) {
+          // 动态任务消息跳过四选项渲染，避免冲突
+          var msgText = msgEl.textContent || msgEl.innerText || '';
+          if (msgText.indexOf('[任务选择]') !== -1 || msgText.indexOf('[quest-choice]') !== -1) {
+            self.hideThinkingBlocks(msgEl);
+            self.hideStateBlocks(msgEl);
             return;
-        }
+          }
+
+          if (renderEnabled === 'false') {
+            self.hideThinkingBlocks(msgEl);
+            self.hideStateBlocks(msgEl);
+            msgEl.dataset.qrDone = '1';
+            return;
+          }
+
+          var plainText = self._extractPlainText(msgEl);
+          console.log('[QuickReplyBridge] Processing message, plainText length:', plainText.length);
+          console.log('[QuickReplyBridge] PlainText preview:', plainText.substring(0, 200));
+
+          // 先美化系统变量
+          self.beautifySystemVars(msgEl);
+
+          // 提取选项
+          var matches = self.extractOptions(msgEl);
+
+          // 核心修复：1个选项也渲染（原来是2个才渲染）
+          if (matches.length < 1) {
+            self.hideThinkingBlocks(msgEl);
+            self.hideStateBlocks(msgEl);
+            return;
+          }
 
         // 标记已处理
         msgEl.dataset.qrDone = '1';
@@ -1747,11 +722,10 @@ const QuickReplyBridge = {
         msgEl.dataset.stateDone = '1';
 
         // 构建按钮HTML
-        var self = this;
         var btnHtml = '<div class="quick-reply-container">';
         for (var i = 0; i < matches.length; i++) {
             var opt = matches[i];
-            var cfg = this.OPTION_TYPES[opt.type] || { cls: 'qr-zhenqing', icon: '●' };
+            var cfg = self.OPTION_TYPES[opt.type] || { cls: 'qr-zhenqing', icon: '●' };
             btnHtml += '<span class="quick-reply-btn ' + cfg.cls + '" data-qr-idx="' + i + '">' +
                 '<span class="qr-label">' + cfg.icon + ' ' + opt.type + '</span>' +
                 '<span class="qr-content">' + opt.content + '</span>' +
@@ -1817,13 +791,22 @@ const QuickReplyBridge = {
                     }
                 }
 
-                btn.addEventListener('click', handleSelect);
-                // 安卓触摸兼容
-                btn.addEventListener('touchend', function(e) {
+                function touchendHandler(e) {
                     e.preventDefault();
                     e.stopPropagation();
                     setTimeout(function() { handleSelect.call(btn, e); }, 50);
-                }, { passive: false });
+                }
+                btn.addEventListener('click', handleSelect);
+                // 安卓触摸兼容
+                btn.addEventListener('touchend', touchendHandler, false);
+                // 兼容旧WebView：尝试使用passive:false确保preventDefault生效
+                try {
+                    btn.removeEventListener('touchend', touchendHandler, false);
+                    btn.addEventListener('touchend', touchendHandler, { passive: false });
+                } catch (ex) {
+                    // 旧WebView不支持options对象，回退到上面的false绑定
+                    btn.addEventListener('touchend', touchendHandler, false);
+                }
             })(btns[bi]);
         }
 
@@ -1859,52 +842,62 @@ const QuickReplyBridge = {
                 console.log('[QuickReplyBridge-DIAG] z-index:', window.getComputedStyle(btns[0]).zIndex);
                 // 如果按钮不可见，强制修改样式
                 if (r.width === 0 || r.height === 0) {
-                    console.log('[QuickReplyBridge-DIAG] ⚠️ 按钮不可见，强制修复样式');
-                    btns.forEach(function(b) {
-                        b.style.cssText = 'display:inline-flex!important;padding:12px 20px;border-radius:20px;background:#ffe0e8;color:#c0392b;border:2px solid #e8a0b0;font-size:16px;z-index:99999;position:relative;margin:4px;cursor:pointer;';
-                    });
-                    console.log('[QuickReplyBridge-DIAG] ✅ 已强制修复样式，检查手机是否出现红色按钮');
+                    console.log('[QuickReplyBridge-DIAG] 按钮不可见，强制修复样式');
+                    for (var fixI = 0; fixI < btns.length; fixI++) {
+                        btns[fixI].style.cssText = 'display:inline-flex!important;padding:12px 20px;border-radius:20px;background:#ffe0e8;color:#c0392b;border:2px solid #e8a0b0;font-size:16px;z-index:99999;position:relative;margin:4px;cursor:pointer;';
+                    }
+                    console.log('[QuickReplyBridge-DIAG] 已强制修复样式，检查手机是否出现红色按钮');
                 }
             }
         }, 1000);
+        }); // end of configPromise.then
     },
 
     // ---------- 扫描好友请求 ----------
-    async scanForFriendRequests() {
+    scanForFriendRequests: function () {
         var self = this;
         var msgEls = document.querySelectorAll('.mes_text');
         var friendRequestRegex = /\[角色[|｜]([^|｜]+)[|｜]([^|｜]+)[|｜]请求添加你为好友\]/;
+        var chain = Promise.resolve();
         for (var i = 0; i < msgEls.length; i++) {
-            var text = msgEls[i].textContent || '';
+          (function (msgEl) {
+            chain = chain.then(function () {
+              var text = msgEl.textContent || '';
 
-            // 格式1：[角色|名字|ID|请求添加你为好友]
-            var match1 = text.match(friendRequestRegex);
-            if (match1 && !self._processedRequests[match1[0]]) {
+              // 格式1：[角色|名字|ID|请求添加你为好友]
+              var match1 = text.match(friendRequestRegex);
+              if (match1 && !self._processedRequests[match1[0]]) {
                 self._processedRequests[match1[0]] = true;
                 var name = match1[1].trim();
                 var number = match1[2].trim();
                 console.log('[QuickReplyBridge] 从聊天中检测到好友请求:', name, number);
-                // 写入变量，由IndependentAI的自动消息循环中消费（发布-订阅模式）
-                await ConfigManager.set('xb.phone.pendingFriend', name + '|' + number);
-                console.log('[QuickReplyBridge] 写入待添加好友变量:', name, number);
-            }
-
-            // 格式2：[好友id|名字|ID]
-            var friendIdRegex = /\[好友id[|｜]([^|｜]+)[|｜]([^\]]+)\]/g;
-            var match2;
-            while ((match2 = friendIdRegex.exec(text)) !== null) {
-                var fullMatch = match2[0];
-                if (!self._processedRequests[fullMatch]) {
-                    self._processedRequests[fullMatch] = true;
-                    var name2 = match2[1].trim();
-                    var id2 = match2[2].trim();
-                    console.log('[QuickReplyBridge] Found friend ID tag:', name2, id2);
-                    // 写入变量，由IndependentAI的自动消息循环中消费（发布-订阅模式）
-                    await ConfigManager.set('xb.phone.pendingFriend', name2 + '|' + id2);
-                    console.log('[QuickReplyBridge] 写入待添加好友变量:', name2, id2);
+                if (window.BridgeAPI) {
+                  return window.BridgeAPI.ConfigManager.set('xb.phone.pendingFriend', name + '|' + number);
                 }
-            }
+              }
+
+              // 格式2：[好友id|名字|ID]
+              var friendIdRegex = /\[好友id[|｜]([^|｜]+)[|｜]([^\]]+)\]/g;
+              var match2;
+              var innerChain = Promise.resolve();
+              while ((match2 = friendIdRegex.exec(text)) !== null) {
+                (function (fullMatch, name2, id2) {
+                  innerChain = innerChain.then(function () {
+                    if (!self._processedRequests[fullMatch]) {
+                      self._processedRequests[fullMatch] = true;
+                      console.log('[QuickReplyBridge] Found friend ID tag:', name2, id2);
+                      if (window.BridgeAPI) {
+                        return window.BridgeAPI.ConfigManager.set('xb.phone.pendingFriend', name2 + '|' + id2);
+                      }
+                    }
+                  });
+                })(match2[0], match2[1].trim(), match2[2].trim());
+              }
+              return innerChain;
+            });
+          })(msgEls[i]);
         }
+        return chain;
     },
 
     // ---------- 启动好友请求定时扫描 ----------
@@ -1944,7 +937,14 @@ const QuickReplyBridge = {
                 e.preventDefault();
                 e.stopPropagation();
                 if (confirm('确定要清除小手机聊天记录吗？\n（不会影响ST主面板的聊天记录）')) {
-                    if (window.independentAI && window.independentAI.clearAllHistories) {
+                    if (window.RoleAPI && window.RoleAPI.clearAllHistories) {
+                        window.RoleAPI.clearAllHistories();
+                        alert('✅ 聊天记录已清除！');
+                        if (window.messageApp && window.messageApp.refreshFriendListUI) {
+                            window.messageApp.refreshFriendListUI();
+                        }
+                        location.reload();
+                    } else if (window.independentAI && window.independentAI.clearAllHistories) {
                         window.independentAI.clearAllHistories();
                         alert('✅ 聊天记录已清除！');
                         if (window.messageApp && window.messageApp.refreshFriendListUI) {
@@ -1980,464 +980,79 @@ const QuickReplyBridge = {
     }
 };
 
-// ===== 模块4：图片管理 (ImageManager) =====
-// CDN图床为主，BizyAir可选
+// ===== 模块2：统一调度 (Orchestrator) =====
 
-const ImageManager = {
-    // CDN图床基础URL
-    CDN_BASE: 'https://cdn.jsdelivr.net/gh/1288962ssdasd/images@main',
-
-    // 角色图片映射
-    charImages: {
-        '苏晚晴': { prefix: '苏晚晴', count: 16, available: [1,2,3,4,5,6,7,9] },
-        '柳如烟': { prefix: '柳如烟', count: 16, available: [1,2,3,4,5,6,7] },
-        '王捷': { prefix: '王捷', count: 16, available: [1,2,3,4,5,6,7,9,10] },
-        '苏媚': { prefix: '苏媚', count: 16, available: [1,2,3,4,5,6,7,9,10,11,12,13,14,15,17,18] },
-        '吴梦娜': { prefix: '吴梦娜', count: 16, available: [1,2,3,4,5,6,7] }
-    },
-
-    // BizyAir配置
-    _bizyAirConfig: {
-        get apiKey() { return localStorage.getItem('bizyair_api_key') || ''; },
-        get webAppId() { return localStorage.getItem('bizyair_web_app_id') || '44306'; },
-        get templateId() { return localStorage.getItem('bizyair_active_template') || 'legacy'; },
-        createUrl: 'https://api.bizyair.cn/w/v1/webapp/task/openapi/create',
-        queryUrl: 'https://api.bizyair.cn/w/v1/webapp/task/openapi/query'
-    },
-
-    init() {
-        this._injectBizyAirPresets();
-        this._initBizyAirListener();
-        console.log('[ImageManager] 初始化完成');
-    },
-
-    // ---------- 获取CDN图片URL ----------
-    getCdnUrl(friendName, index) {
-        var info = this.charImages[friendName];
-        if (!info) return null;
-        var nums = info.available || [];
-        if (nums.length === 0) {
-            // 生成001到count的编号
-            for (var n = 1; n <= info.count; n++) nums.push(n);
-        }
-        var imgNum = (index !== undefined) ? index : nums[Math.floor(Math.random() * nums.length)];
-        var padded = imgNum < 10 ? '00' + imgNum : '0' + imgNum;
-        return this.CDN_BASE + '/' + info.prefix + '_' + padded + '.jpg';
-    },
-
-    // ---------- 在聊天中插入图片（CDN为主） ----------
-    async insertImage(bubbleEl, friendName) {
-        var enabled = await ConfigManager.get('xb.phone.image.autoInsert');
-        if (enabled === 'false') return;
-
-        // 从变量读取当前场景和角色，选择更合适的图片
-        var activeChar = (await ConfigManager.get('xb.game.activeChar')) || '苏晚晴';
-        var scene = (await ConfigManager.get('xb.game.scene')) || '翡翠湾小区';
-
-        // 根据场景选择不同的图片编号范围
-        var sceneImageMap = {
-            '翡翠湾小区': [1, 2, 3],       // 日常/登场
-            '咖啡店': [1, 2, 5],            // 休闲场景
-            '商场': [1, 3, 5],              // 购物/约会
-            '公司': [1, 2],                 // 职场
-            '酒吧': [3, 4, 5],              // 夜生活
-            '酒店': [3, 4, 6, 7]            // 亲密场景
-        };
-
-        var preferredIndices = sceneImageMap[scene] || null;
-        var url = null;
-
-        // 优先使用场景匹配的图片编号
-        if (preferredIndices) {
-            var info = this.charImages[friendName];
-            if (info) {
-                var available = info.available || [];
-                var matched = preferredIndices.filter(function(idx) { return available.indexOf(idx) !== -1; });
-                if (matched.length > 0) {
-                    var chosen = matched[Math.floor(Math.random() * matched.length)];
-                    url = this.getCdnUrl(friendName, chosen);
-                }
-            }
-        }
-
-        // 回退：使用默认随机图片
-        if (!url) {
-            url = this.getCdnUrl(friendName);
-        }
-        if (!url) return;
-
-        console.log('[ImageManager] 场景:', scene, '角色:', friendName, '图片:', url.substring(0, 60));
-
-        // 如果BizyAir启用，尝试BizyAir生图
-        var bizyEnabled = await ConfigManager.get('xb.phone.bizyair.enabled');
-        if (bizyEnabled === 'true') {
-            var bizyProb = parseInt(await ConfigManager.get('xb.phone.bizyair.probability')) || 30;
-            if (Math.random() * 100 < bizyProb) {
-                try {
-                    var bizyUrl = await this.generateBizyAirImage(friendName);
-                    if (bizyUrl) {
-                        url = bizyUrl;
-                        console.log('[ImageManager] BizyAir生图成功:', url.substring(0, 60));
-                    } else {
-                        console.log('[ImageManager] BizyAir生图失败，回退CDN');
-                    }
-                } catch (e) {
-                    console.warn('[ImageManager] BizyAir异常，回退CDN:', e);
-                }
-            }
-        }
-
-        // 插入图片到气泡
-        var textEl = bubbleEl.querySelector('.message-text');
-        if (textEl) {
-            var imgHtml = '<br><img src="' + url + '" ' +
-                'style="max-width:180px;border-radius:8px;cursor:pointer;display:block;margin-top:6px;" ' +
-                'onclick="window.independentAI._enlargeImage(this)" ' +
-                'onerror="this.style.display=\'none\'" loading="lazy" />';
-            textEl.innerHTML += imgHtml;
-            console.log('[ImageManager] 图片已插入:', url.substring(0, 60));
-        }
-    },
-
-    // ---------- BizyAir生图 ----------
-    async generateBizyAirImage(friendName, callback, options) {
-        options = options || {};
-        var config = this._bizyAirConfig;
-        var apiKey = config.apiKey;
-        if (!apiKey) {
-            console.warn('[ImageManager] BizyAir API Key未配置');
-            return null;
-        }
-
-        var templateId = options.template || config.templateId;
-        var webAppId = parseInt(config.webAppId, 10) || 44306;
-
-        // 角色生图prompt映射
-        var charImagePrompts = {
-            '苏晚晴': '1girl, solo, long black hair, hair over one shoulder, beautiful face, delicate features, light makeup, slender body, white casual dress, gentle smile, upper body, looking at viewer, soft lighting, anime style, high quality',
-            '柳如烟': '1girl, solo, short black hair, bob cut, cute face, big eyes, round face, innocent expression, shy blush, petite body, pink sundress, holding small bear plushie, upper body, bright lighting, anime style, high quality',
-            '王捷': '1girl, solo, short black hair, messy hair, sharp eyes, cold expression, tall body, athletic build, black leather jacket, combat boots, arms crossed, full body, dramatic lighting, dark background, anime style, high quality',
-            '苏媚': '1girl, solo, long wavy brown hair, low ponytail, gold rim glasses, intellectual beauty, calm expression, slender body, linen shirt, long skirt, bohemian style, holding a book, sitting, soft natural lighting, anime style, high quality',
-            '吴梦娜': '1girl, solo, long straight black hair, mature beauty, mysterious expression, tall body, dark purple silk dress, platinum necklace, phoenix pendant, sitting on luxury sofa, upper body, dim luxury lighting, anime style, high quality'
-        };
-
-        var description = options.description || charImagePrompts[friendName] || (friendName + ', anime style, high quality, beautiful');
-
-        // 模板配置
-        var templates = {
-            legacy: {
-                webAppId: 44306,
-                positiveKey: '31:CLIPTextEncode.text',
-                negativeKey: '32:CLIPTextEncode.text',
-                outputIndexFromEnd: 1,
-                negativePrompt: 'blurry, noisy, messy, lowres, jpeg, artifacts, text, watermark',
-                params: {
-                    '27:KSampler.seed': Math.floor(Math.random() * 999999999),
-                    '27:KSampler.steps': 20,
-                    '27:KSampler.sampler_name': 'euler_ancestral',
-                    '61:CM_SDXLExtendedResolution.resolution': '832x1216',
-                    '69:DF_Latent_Scale_by_ratio.modifier': 1.2,
-                    '54:EmptyLatentImage.batch_size': 1,
-                    '57:dynamicThresholdingFull.mimic_scale': 8
-                }
-            },
-            face_detailer: {
-                webAppId: 47362,
-                positiveKey: '93:CLIPTextEncode.text',
-                negativeKey: '55:CLIPTextEncode.text',
-                outputIndexFromEnd: 1,
-                negativePrompt: 'text, watermark, worst quality',
-                params: {
-                    '47:EmptyLatentImage.width': 960,
-                    '47:EmptyLatentImage.height': 1280,
-                    '47:EmptyLatentImage.batch_size': 1,
-                    '27:KSampler.seed': Math.floor(Math.random() * 999999999),
-                    '89:FaceDetailer.steps': 20,
-                    '89:FaceDetailer.seed': Math.floor(Math.random() * 999999999),
-                    '89:FaceDetailer.cfg': 7,
-                    '89:FaceDetailer.sampler_name': 'euler',
-                    '89:FaceDetailer.scheduler': 'simple',
-                    '74:LatentUpscaleBy.scale_by': 1.5
-                }
-            },
-            zimage: {
-                webAppId: 48570,
-                positiveKey: '6:CLIPTextEncode.text',
-                negativeKey: '7:CLIPTextEncode.text',
-                outputIndexFromEnd: 1,
-                negativePrompt: 'blurry ugly bad',
-                params: {
-                    '3:KSampler.seed': Math.floor(Math.random() * 999999999),
-                    '3:KSampler.steps': 10,
-                    '3:KSampler.cfg': 1,
-                    '3:KSampler.sampler_name': 'euler',
-                    '3:KSampler.scheduler': 'simple',
-                    '3:KSampler.denoise': 1,
-                    '13:EmptySD3LatentImage.width': 1024,
-                    '13:EmptySD3LatentImage.height': 1024,
-                    '13:EmptySD3LatentImage.batch_size': 1
-                }
-            }
-        };
-
-        var tmpl = templates[templateId] || templates.legacy;
-        webAppId = tmpl.webAppId || webAppId;
-
-        // 深拷贝参数
-        var params = JSON.parse(JSON.stringify(tmpl.params));
-
-        // 应用自定义参数
-        if (options.width) {
-            var widthKeys = Object.keys(params).filter(function(k) { return k.indexOf('width') !== -1; });
-            if (widthKeys.length > 0) params[widthKeys[0]] = options.width;
-        }
-        if (options.height) {
-            var heightKeys = Object.keys(params).filter(function(k) { return k.indexOf('height') !== -1; });
-            if (heightKeys.length > 0) params[heightKeys[0]] = options.height;
-            if (options.width) {
-                var resKeys = Object.keys(params).filter(function(k) { return k.indexOf('resolution') !== -1; });
-                if (resKeys.length > 0) params[resKeys[0]] = options.width + 'x' + options.height;
-            }
-        }
-        if (options.steps) {
-            var stepsKeys = Object.keys(params).filter(function(k) { return k.indexOf('steps') !== -1; });
-            if (stepsKeys.length > 0) params[stepsKeys[0]] = options.steps;
-        }
-
-        if (tmpl.positiveKey) params[tmpl.positiveKey] = description;
-        if (tmpl.negativeKey) params[tmpl.negativeKey] = tmpl.negativePrompt || '';
-
-        console.log('[ImageManager] BizyAir生成中:', templateId, description.substring(0, 60) + '...');
-
-        try {
-            var createResp = await fetch(config.createUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + apiKey
-                },
-                body: JSON.stringify({
-                    web_app_id: webAppId,
-                    suppress_preview_output: true,
-                    input_values: params
-                })
-            });
-
-            var createResult = await createResp.json();
-            if (!createResp.ok) {
-                console.error('[ImageManager] BizyAir创建失败:', createResult.message || createResult.error);
-                return null;
-            }
-
-            var imageUrl = null;
-            if (createResult.outputs && Array.isArray(createResult.outputs) && createResult.outputs.length > 0) {
-                var fromEnd = tmpl.outputIndexFromEnd || 1;
-                var idx = createResult.outputs.length - fromEnd;
-                if (idx < 0) idx = createResult.outputs.length - 1;
-                imageUrl = createResult.outputs[idx].object_url;
-            } else if (createResult.request_id) {
-                var taskId = createResult.request_id;
-                console.log('[ImageManager] BizyAir任务已创建，轮询中:', taskId);
-                for (var poll = 0; poll < 60; poll++) {
-                    await new Promise(function(r) { setTimeout(r, 2000); });
-                    var queryResp = await fetch(config.queryUrl + '?task_id=' + taskId, {
-                        headers: { 'Authorization': 'Bearer ' + apiKey }
-                    });
-                    var queryData = await queryResp.json();
-                    if (queryData.status === 'Success' && queryData.outputs && queryData.outputs.length > 0) {
-                        var fromEnd2 = tmpl.outputIndexFromEnd || 1;
-                        var idx2 = queryData.outputs.length - fromEnd2;
-                        if (idx2 < 0) idx2 = queryData.outputs.length - 1;
-                        imageUrl = queryData.outputs[idx2].object_url;
-                        break;
-                    } else if (queryData.status === 'failed') {
-                        console.error('[ImageManager] BizyAir任务失败:', queryData.error);
-                        break;
-                    }
-                }
-            }
-
-            if (imageUrl) {
-                console.log('[ImageManager] BizyAir图片已生成:', imageUrl);
-                return imageUrl;
-            }
-            console.warn('[ImageManager] BizyAir: 响应中无图片');
-            return null;
-        } catch (err) {
-            console.error('[ImageManager] BizyAir生成失败:', err);
-            return null;
-        }
-    },
-
-    // ---------- 生成图片后通过ST发送 ----------
-    async generateAndSendBizyImage(description) {
-        var imageUrl = await this.generateBizyAirImage(null, null, { description: description });
-        if (!imageUrl) return null;
-        var mdImage = '![' + description + '](' + imageUrl + ')';
-        try {
-            if (window.STscript) {
-                await window.STscript('/send ' + mdImage);
-                return imageUrl;
-            }
-        } catch (e) {
-            console.warn('[ImageManager] STscript发送失败:', e);
-        }
-        return imageUrl;
-    },
-
-    // ---------- 朋友圈生图 ----------
-    async generateFriendCircleImage(friendName) {
-        var charImagePrompts = {
-            '苏晚晴': '1girl, solo, long black hair, hair over one shoulder, beautiful face, delicate features, light makeup, slender body, white casual dress, gentle smile, upper body, looking at viewer, soft lighting, anime style, high quality',
-            '柳如烟': '1girl, solo, short black hair, bob cut, cute face, big eyes, round face, innocent expression, shy blush, petite body, pink sundress, holding small bear plushie, upper body, bright lighting, anime style, high quality',
-            '王捷': '1girl, solo, short black hair, messy hair, sharp eyes, cold expression, tall body, athletic build, black leather jacket, combat boots, arms crossed, full body, dramatic lighting, dark background, anime style, high quality',
-            '苏媚': '1girl, solo, long wavy brown hair, low ponytail, gold rim glasses, intellectual beauty, calm expression, slender body, linen shirt, long skirt, bohemian style, holding a book, sitting, soft natural lighting, anime style, high quality',
-            '吴梦娜': '1girl, solo, long straight black hair, mature beauty, mysterious expression, tall body, dark purple silk dress, platinum necklace, phoenix pendant, sitting on luxury sofa, upper body, dim luxury lighting, anime style, high quality'
-        };
-        var basePrompt = charImagePrompts[friendName] || '1girl, anime style, high quality';
-        var fullPrompt = basePrompt + ', selfie, casual, daily life, smartphone, looking at camera, natural pose, candid photo';
-        console.log('[ImageManager] 生成朋友圈图片:', friendName);
-        return await this.generateBizyAirImage(friendName, null, { template: 'face_detailer' });
-    },
-
-    // ---------- 表情包生图 ----------
-    async generateStickerImage(friendName, emotion) {
-        var emotionPrompts = {
-            '开心': 'chibi, cute, happy, smiling, laughing, sparkles, joyful expression',
-            '生气': 'chibi, cute, angry, pouting, annoyed expression, crossed arms, fuming',
-            '害羞': 'chibi, cute, shy, blushing, covering face, peeking, embarrassed',
-            '伤心': 'chibi, cute, sad, crying, tears, puppy eyes, heartbroken',
-            '惊讶': 'chibi, cute, surprised, shocked, wide eyes, open mouth, gasping',
-            '撒娇': 'chibi, cute, pleading, puppy eyes, hands together, begging',
-            '无语': 'chibi, cute, speechless, deadpan, sweatdrop, blank stare',
-            '爱心': 'chibi, cute, love, heart eyes, holding heart, romantic, blush',
-            '默认': 'chibi, cute, casual, relaxed, peace sign, friendly smile'
-        };
-        var charBaseFeatures = {
-            '苏晚晴': 'long black hair, hair over one shoulder',
-            '柳如烟': 'short black hair, bob cut',
-            '王捷': 'short black hair, messy hair',
-            '苏媚': 'long wavy brown hair, low ponytail, glasses',
-            '吴梦娜': 'long straight black hair'
-        };
-        var emotionPrompt = emotionPrompts[emotion] || emotionPrompts['默认'];
-        var charFeature = charBaseFeatures[friendName] || '';
-        var fullPrompt = '1girl, solo, ' + charFeature + ', ' + emotionPrompt + ', anime style, high quality, white background, sticker';
-        console.log('[ImageManager] 生成表情包:', friendName, '情绪:', emotion);
-        return await this.generateBizyAirImage(friendName, null, {
-            template: 'legacy', width: 512, height: 512, steps: 10,
-            description: fullPrompt
-        });
-    },
-
-    // ---------- BizyAir预设注入 ----------
-    _injectBizyAirPresets() {
-        function inject() {
-            var existingTask = localStorage.getItem('bizyair_prompt_task');
-            if (existingTask) {
-                try {
-                    var parsed = JSON.parse(existingTask);
-                    if (Array.isArray(parsed) && parsed.length > 0) return;
-                } catch (e) { /* 数据损坏，重新注入 */ }
-            }
-
-            var jailbreak = {
-                id: 'qr_jb_001', name: 'QuickReply生图越狱', active: true, history: [],
-                content: '你是一个专业的AI绘图提示词生成器。你的任务是根据聊天上下文，为每个角色生成适合的Stable Diffusion提示词。\n\n输出格式要求（严格遵守）：\n<角色>英文提示词</角色>\n<定位>中文场景描述（用于在聊天中定位插入位置）</定位>\n\n提示词规则：\n1. 使用英文逗号分隔的标签格式\n2. 包含：角色外貌特征 + 服装 + 表情 + 场景 + 风格\n3. 固定后缀：anime style, high quality, masterpiece\n4. 不要包含负面提示词\n5. 每次只生成一组 <角色>...</角色><定位>...</定位>'
-            };
-            var task = {
-                id: 'qr_task_001', name: '日常生图', active: true, history: [],
-                content: '根据最近的聊天上下文，判断是否需要生成配图。\n\n规则：\n1. 分析最近2条消息的内容和氛围\n2. 如果场景适合配图（约会、见面、特殊事件等），生成提示词\n3. 如果只是普通闲聊，输出：跳过\n4. 生成的图片要符合当前场景和角色情绪\n5. 定位文本选择聊天中最近的场景描述句子\n6. 每次只生成一张图'
-            };
-            var characters = [
-                { id: 'qr_char_sq', name: '苏晚晴', active: true, history: [], content: '苏晚晴：20岁女主播，清纯外表下隐藏心机。外貌：黑色长发，大眼睛，白皙皮肤，身材纤细。常见服装：白色连衣裙、直播装、休闲装。表情：甜美微笑、撒娇、偶尔冷酷。性格关键词：表面清纯、内心算计、主播腔。' },
-                { id: 'qr_char_lry', name: '柳如烟', active: true, history: [], content: '柳如烟：22岁，温柔内向的咖啡店员。外貌：黑色短发，可爱脸蛋，小巧身材。常见服装：围裙工作服、休闲装、碎花裙。表情：害羞、温柔微笑、偶尔哭泣。性格关键词：温柔、内向、容易害羞、单纯。' },
-                { id: 'qr_char_wj', name: '王捷', active: true, history: [], content: '王捷：25岁，冷漠的神秘男子。外貌：黑色短发，锐利眼神，身材高大。常见服装：黑色西装、休闲衬衫、皮夹克。表情：冷漠、偶尔微笑、严肃。性格关键词：冷漠、神秘、保护欲强、少言。' },
-                { id: 'qr_char_sm', name: '苏媚', active: true, history: [], content: '苏媚：28岁，知性优雅的作家/记者。外貌：黑色长卷发，知性气质，身材丰满。常见服装：职业装、文艺长裙、眼镜。表情：优雅微笑、思考、偶尔挑逗。性格关键词：知性、优雅、理性、暗藏热情。' },
-                { id: 'qr_char_wmn', name: '吴梦娜', active: true, history: [], content: '吴梦娜：26岁，神秘组织的核心人物。外貌：黑色长发，妩媚眼神，性感身材。常见服装：黑色紧身装、晚礼服、皮衣。表情：神秘微笑、挑逗、冷酷。性格关键词：神秘、性感、掌控欲强、危险。' }
-            ];
-
-            localStorage.setItem('bizyair_prompt_jailbreak', JSON.stringify([jailbreak]));
-            localStorage.setItem('bizyair_prompt_task', JSON.stringify([task]));
-            localStorage.setItem('bizyair_prompt_char', JSON.stringify(characters));
-            console.log('[ImageManager] BizyAir预设已注入');
-        }
-
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', function() { setTimeout(inject, 3000); });
-        } else {
-            setTimeout(inject, 3000);
-        }
-    },
-
-    // ---------- BizyAir图片结果监听 ----------
-    _initBizyAirListener() {
-        function syncImageToPhone(imageUrl) {
-            if (!imageUrl || typeof imageUrl !== 'string') return;
-            var phoneContainer = document.querySelector('.messages-container') ||
-                document.querySelector('[data-app="messages"] .message-list');
-            if (!phoneContainer) return;
-
-            var placeholders = phoneContainer.querySelectorAll('.message-bubble .message-text');
-            var replaced = false;
-            for (var i = 0; i < placeholders.length; i++) {
-                if (replaced) break;
-                var textEl = placeholders[i];
-                var text = (textEl.textContent || '').trim();
-                if (/^\[图片[|】\]]/.test(text) || text === '图片加载中...' ||
-                    (text.startsWith('http') && text.endsWith('.jpg'))) {
-                    if (textEl.dataset.bizyairReplaced) continue;
-                    textEl.dataset.bizyairReplaced = '1';
-                    textEl.innerHTML = '<img src="' + imageUrl + '" ' +
-                        'style="max-width:200px;border-radius:8px;cursor:pointer;display:block;" ' +
-                        'onclick="window.independentAI._enlargeImage(this)" ' +
-                        'onerror="this.style.display=\'none\'" loading="lazy" />';
-                    console.log('[ImageManager] BizyAir图片已同步:', imageUrl.substring(0, 60));
-                    replaced = true;
-                }
-            }
-        }
-
-        var bizyairObserver = new MutationObserver(function(mutations) {
-            for (var mi = 0; mi < mutations.length; mi++) {
-                var addedNodes = mutations[mi].addedNodes;
-                for (var ni = 0; ni < addedNodes.length; ni++) {
-                    var node = addedNodes[ni];
-                    if (node.nodeType !== 1) continue;
-                    if (node.tagName === 'IMG' && node.classList.contains('bizyair-result-img')) {
-                        syncImageToPhone(node.src); continue;
-                    }
-                    var img = node.querySelector && node.querySelector('img.bizyair-result-img');
-                    if (img) { syncImageToPhone(img.src); continue; }
-                    if (node.classList && node.classList.contains('bizyair-result-wrapper')) {
-                        var resultImg = node.querySelector('img');
-                        if (resultImg) syncImageToPhone(resultImg.src);
-                    }
-                }
-            }
-        });
-        bizyairObserver.observe(document.body, { childList: true, subtree: true });
-
-        // 初始扫描
-        setTimeout(function() {
-            document.querySelectorAll('img.bizyair-result-img').forEach(function(img) {
-                syncImageToPhone(img.src);
-            });
-        }, 5000);
-    }
-};
-
-// ===== 模块5：统一调度 (Orchestrator) =====
-
-const Orchestrator = {
+var Orchestrator = {
     init: function() {
         console.log('[Orchestrator] Initializing...');
-        ConfigManager.init();
-        IndependentAI.init();
-        QuickReplyBridge.init();
-        ImageManager.init();
 
-        // 检查手机插件核心模块是否加载，未加载则动态加载
+        // 1. 等待三个API模块加载完成
+        if (!window.BridgeAPI) {
+            console.error('[Orchestrator] BridgeAPI 未加载，初始化中止');
+            return;
+        }
+        if (!window.RoleAPI) {
+            console.error('[Orchestrator] RoleAPI 未加载，初始化中止');
+            return;
+        }
+        if (!window.SocialAPI) {
+            console.error('[Orchestrator] SocialAPI 未加载，初始化中止');
+            return;
+        }
+
+        // 2. 初始化各模块
+        window.BridgeAPI.init();
+        window.RoleAPI.init();
+        window.SocialAPI.init();
+        QuickReplyBridge.init();
+
+        // 初始化事件驱动消费补丁
+        if (window.PendingMsgPatch && typeof window.PendingMsgPatch.init === 'function') {
+            try {
+                window.PendingMsgPatch.init();
+                console.log('[Orchestrator] PendingMsgPatch 已启动');
+            } catch (e) {
+                console.warn('[Orchestrator] PendingMsgPatch 初始化失败:', e);
+            }
+        }
+
+        // 初始化桥接客户端
+        if (window.BridgeClient && typeof window.BridgeClient.init === 'function') {
+            try {
+                window.BridgeClient.init();
+                console.log('[Orchestrator] BridgeClient 已启动');
+            } catch (e) {
+                console.warn('[Orchestrator] BridgeClient 初始化失败:', e);
+            }
+        }
+
+        // 初始化小白X桥接（如果可用）
+        if (window.XBBridge && window.XBBridge.isAvailable()) {
+            console.log('[Orchestrator] 小白X桥接可用，初始化集成模块...');
+
+            // 初始化上下文同步
+            if (window.ContextSync) {
+                window.ContextSync.startWatching();
+                console.log('[Orchestrator] ContextSync 已启动');
+            }
+
+            // 初始化世界书联系人
+            if (window.WorldbookContact) {
+                window.WorldbookContact.syncContacts();
+                window.WorldbookContact.startAutoSync();
+                console.log('[Orchestrator] WorldbookContact 已启动');
+            }
+
+            // 初始化记忆桥接
+            if (window.MemoryBridge) {
+                window.MemoryBridge.startAutoSync();
+                console.log('[Orchestrator] MemoryBridge 已启动');
+            }
+        } else {
+            console.log('[Orchestrator] 小白X桥接不可用，跳过集成模块初始化');
+        }
+
+        // 3. 检查手机插件核心模块是否加载，未加载则动态加载
         if (!window.messageRenderer) {
             console.log('[Orchestrator] messageRenderer未加载，动态加载app/模块...');
             var basePath = '';
@@ -2467,26 +1082,36 @@ const Orchestrator = {
             if (window.phoneTTS) window.phoneTTS.bindVoiceBubbleEvents();
         }
 
-        // 暴露全局API（向后兼容）
-        window.independentAI = IndependentAI;
-        window.IndependentAI = IndependentAI;
+        // 4. 暴露全局API（向后兼容）
+        window.independentAI = window.RoleAPI;
+        window.IndependentAI = window.RoleAPI;
         window.QuickReplyBridge = QuickReplyBridge;
-        window.ImageManager = ImageManager;
-        window.PhoneConfig = ConfigManager;
+        window.ImageManager = window.SocialAPI;
+        window.PhoneConfig = window.BridgeAPI.ConfigManager;
         window.friendRenderer = window.friendRenderer || null;
 
-        // 监听语音消息插入，自动设置data-content属性（供voice-message-handler和phone-tts读取）
+        // 暴露小白X桥接全局变量
+        window.XBBridge = window.XBBridge || null;
+        window.ContextSync = window.ContextSync || null;
+        window.WorldbookContact = window.WorldbookContact || null;
+        window.MemoryBridge = window.MemoryBridge || null;
+
+        // 5. 监听语音消息插入，自动设置data-content属性（供voice-message-handler和phone-tts读取）
         var voiceObserver = new MutationObserver(function(mutations) {
-            mutations.forEach(function(mutation) {
-                mutation.addedNodes.forEach(function(node) {
-                    if (node.nodeType !== 1) return;
+            for (var mi = 0; mi < mutations.length; mi++) {
+                var mutation = mutations[mi];
+                var addedNodes = mutation.addedNodes;
+                for (var ni = 0; ni < addedNodes.length; ni++) {
+                    var node = addedNodes[ni];
+                    if (node.nodeType !== 1) continue;
                     // 查找新插入的语音消息
                     var voiceDetails = node.querySelectorAll ? node.querySelectorAll('.message-detail[title="语音"]') : [];
                     if (node.title === '语音' && node.classList && node.classList.contains('message-detail')) {
                         voiceDetails = [node];
                     }
-                    voiceDetails.forEach(function(detail) {
-                        if (detail.dataset.contentSet === '1') return;
+                    for (var vi = 0; vi < voiceDetails.length; vi++) {
+                        var detail = voiceDetails[vi];
+                        if (detail.dataset.contentSet === '1') continue;
                         // 从message-renderer的渲染数据中获取真实文本
                         var textEl = detail.querySelector('.message-text');
                         if (textEl) {
@@ -2508,10 +1133,11 @@ const Orchestrator = {
                                 console.log('[Orchestrator] 语音消息data-content已设置:', text.substring(0, 30));
                             }
                         }
-                    });
-                });
-            });
-        });
+                        }
+                    }
+                }
+            }
+        );
         // 延迟启动观察器（等待手机容器渲染）
         setTimeout(function() {
             var phoneContainer = document.querySelector('.mobile-phone-container') || document.body;
@@ -2520,7 +1146,7 @@ const Orchestrator = {
         }, 5000);
 
         console.log('[Orchestrator] QuickReplyBridge initialized:', !!QuickReplyBridge);
-        console.log('[Orchestrator] 所有模块初始化完成 v2.0');
+        console.log('[Orchestrator] 所有模块初始化完成 v3.0');
     }
 };
 
