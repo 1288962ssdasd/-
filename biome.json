@@ -1,0 +1,120 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.0/schema.json",
+  "organizeImports": {
+    "enabled": false
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": false,
+      "complexity": {
+        "noForEach": "off",
+        "noBannedTypes": "warn",
+        "useSimplifiedLogicExpression": "warn"
+      },
+      "correctness": {
+        "noUnusedVariables": "warn",
+        "noUnusedImports": "warn",
+        "useExhaustiveDependencies": "warn",
+        "noConstAssign": "error",
+        "noGlobalObjectCalls": "error",
+        "noInnerDeclarations": "error",
+        "noInvalidConstructorSuper": "error",
+        "noSelfAssign": "error",
+        "noUndeclaredVariables": "off",
+        "noUnreachable": "error"
+      },
+      "suspicious": {
+        "noExplicitAny": "warn",
+        "noConsole": "off",
+        "noDebugger": "error",
+        "noEval": "error",
+        "noEmptyBlockStatements": "warn",
+        "noAssignInExpressions": "warn",
+        "noDoubleEquals": "warn",
+        "noCommentText": "off"
+      },
+      "style": {
+        "noVar": "warn",
+        "useConst": "warn",
+        "useTemplate": "warn",
+        "noNonNullAssertion": "warn",
+        "useWhile": "off",
+        "noUselessElse": "warn"
+      },
+      "security": {
+        "noDangerouslySetInnerHtml": "error",
+        "noEval": "error"
+      }
+    }
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "always",
+      "trailingCommas": "all"
+    },
+    "globals": [
+      "window",
+      "document",
+      "console",
+      "setTimeout",
+      "setInterval",
+      "clearTimeout",
+      "clearInterval",
+      "XMLHttpRequest",
+      "WebSocket",
+      "fetch",
+      "Promise",
+      "Map",
+      "Set",
+      "JSON",
+      "Error",
+      "Array",
+      "Object",
+      "String",
+      "Number",
+      "Boolean",
+      "RegExp",
+      "Date",
+      "Math",
+      "parseInt",
+      "parseFloat",
+      "isNaN",
+      "isFinite",
+      "encodeURIComponent",
+      "decodeURIComponent",
+      "atob",
+      "btoa",
+      "jQuery",
+      "$",
+      "eventSource",
+      "event_types",
+      "chat",
+      "characters",
+      "this_chid",
+      "name1",
+      "name2",
+      "SillyTavern"
+    ]
+  },
+  "files": {
+    "ignore": [
+      "node_modules",
+      "images",
+      "*.min.js",
+      "vendor"
+    ]
+  },
+  "vcs": {
+    "enabled": false,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  }
+}
